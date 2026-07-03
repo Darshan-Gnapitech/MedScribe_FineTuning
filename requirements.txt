@@ -1,0 +1,9 @@
+datasets==4.4.2
+evaluate==0.4.6
+huggingface_hub==0.36.0
+jiwer==4.0.0
+numpy==2.5.0
+peft==0.19.1
+soundfile==0.13.1
+torch==2.5.1+cu121
+transformers==4.57.3
