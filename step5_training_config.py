@@ -55,7 +55,7 @@ class MedicalWhisperTrainingConfig:
     adam_beta2: float = 0.999
     max_grad_norm: float = 1.0
     early_stopping_patience: int = 5
-    eval_steps: int = 322
+    eval_steps: int = 200
 
     def save(self, path: str = "training_config.json"):
         with open(path, "w") as f:

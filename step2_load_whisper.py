@@ -9,9 +9,11 @@ Outputs: processor, model, baseline transcription string.
 import numpy as np
 import torch
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
+from dotenv import load_dotenv
+import os 
+load_dotenv()  # load environment variables from .env file
 
-
-MODEL_NAME = "openai/whisper-small"
+MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-small")  # default to small model
 # MODEL_NAME = "openai/whisper-large-v3"  # uncomment for full run
 
 
@@ -49,7 +51,7 @@ def run_sanity_check(
     print("\nSanity check: base Whisper on first training sample ...")
     input_features = processor(
         arr,
-        sampling_rate=sample["sampling_rate"],
+        sampling_rate=16000,
         return_tensors="pt",
     ).input_features
 
@@ -80,7 +82,6 @@ def print_deliverable():
 
 if __name__ == "__main__":
     from step1_load_dataset import load_primock_med
-    from step2_decode_audio import decode_dataset
     import numpy as np
 
     dataset = load_primock_med()

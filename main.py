@@ -5,33 +5,47 @@ Unified entry point for the full Whisper LoRA fine-tuning pipeline.
 Orchestrates Steps 1-10 in order.
 """
 
+from matplotlib.pylab import sample
 import torch
-from step1_load_dataset import load_primock_med
-from step2_decode_audio import decode_dataset
-from step3_load_whisper import load_whisper, run_sanity_check, print_deliverable
-from step4_attach_lora import attach_lora
-from step5_preprocess import preprocess_dataset
-from step6_training_config import build_training_components
-from train import train
-
+from step0_build_dataset import build_dataset
+from step1_load_dataset import load_chunk_dataset
+from step2_load_whisper import load_whisper, run_sanity_check, print_deliverable
+from step3_attach_lora import attach_lora
+from step4_preprocess import preprocess_dataset
+from step5_training_config import build_training_components
+from step6_train import train
+import soundfile as sf
 import gc
 def main():
     print("\n" + "=" * 60)
     print("WHISPER MEDICAL LoRA — FULL PIPELINE")
     print("=" * 60)
+    EXPORT_DIR = "./whisper-medical-lora/exported_best"
+    CSV_PATH = r"D:\files (5)\files (5)\input_dir\datasets.xlsx"
 
-    # ── Step 1: Load dataset ─────────────────────────────────────
-    dataset = load_primock_med()
 
-    # ── Step 2: Decode audio ─────────────────────────────────────
-    dataset, sample, arr = decode_dataset(dataset)
+    OUTPUT_DIR = r"D:\files (5)\files (5)"
+
+    build_info = build_dataset(
+        csv_path=CSV_PATH,
+        output_dir=OUTPUT_DIR,
+    )
+    dataset = load_chunk_dataset(
+        manifest_path=build_info["manifest_path"],
+        chunks_dir=build_info["chunks_dir"],
+    )   
+    sample = dataset["train"][0]
+    arr, sr = sf.read(
+        sample["audio"]["path"],
+        dtype="float32"
+    )
     # ── Step 3: Load Whisper ─────────────────────────────────────
     processor, model = load_whisper()
     baseline = run_sanity_check(model, processor, arr, sample)
     print_deliverable()
 
     # ── Step 4: Attach LoRA ──────────────────────────────────────
-    model = attach_lora(model)
+    model = attach_lora(model, resume_from=EXPORT_DIR)
 
     # ── Step 5: Preprocess dataset ───────────────────────────────
     dataset = preprocess_dataset(dataset, processor)

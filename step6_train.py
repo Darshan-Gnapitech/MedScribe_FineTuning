@@ -29,7 +29,7 @@ from transformers import (
 )
 from peft import PeftModel
 from jiwer import wer as compute_wer
-
+from model_export import export_best_weights
 
 # ============================================================================
 # 2. Early stopping state
@@ -225,7 +225,7 @@ def train(
     )
     labels = torch.tensor(sample["labels"])
     print("Labels:", processor.tokenizer.decode(
-        labels[0]), len(processor.tokenizer.decode(labels[0])))
+        labels[0]), len(processor.tokenizer.decode(labels.tolist())))
     assert processor.tokenizer.eos_token_id in sample["labels"], (
         "No EOS token in labels — decoder will never learn to stop"
     )
@@ -407,6 +407,8 @@ def train(
                 if improved:
                     save_checkpoint(model, optimizer, scaler,
                                     global_step, metrics, output_dir, "best")
+                    export_best_weights(model, os.path.join(
+                        output_dir, "exported_best"))
                 save_checkpoint(model, optimizer, scaler,
                                 global_step, metrics, output_dir, "latest")
                 if early_stop.should_stop:

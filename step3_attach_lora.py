@@ -8,15 +8,16 @@ Outputs: LoRA-attached WhisperForConditionalGeneration.
 
 from typing import List, Optional
 from transformers import WhisperForConditionalGeneration
-from peft import LoraConfig, get_peft_model, TaskType
-
+from peft import LoraConfig, get_peft_model, PeftModel
+import os
 
 def attach_lora(
     model: WhisperForConditionalGeneration,
-    r: int = 32,
+    r: int = 16,
     lora_alpha: int = 64,
     lora_dropout: float = 0.05,
     target_modules: Optional[List[str]] = None,
+    resume_from: Optional[str] = None,
 ) -> WhisperForConditionalGeneration:
     """
     Freeze base Whisper weights and attach LoRA to attention projections.
@@ -35,7 +36,25 @@ def attach_lora(
         bias="none",
     )
 
-    model = get_peft_model(model, lora_config)
+    has_existing = resume_from and os.path.exists(
+        os.path.join(resume_from, "adapter_config.json"))
+
+    if has_existing:
+        print(
+            f"[LoRA] Found existing weights at {resume_from} — loading instead of fresh init")
+        # is_trainable=True is NOT the default here — PEFT loads adapters
+        # frozen/inference-only unless you explicitly ask otherwise. Miss
+        # this and "resumed" training silently does nothing: zero gradient
+        # flow, loss looks fine, nothing actually updates.
+        model = PeftModel.from_pretrained(
+            model, resume_from, is_trainable=True)
+    else:
+        print("[LoRA] No existing weights found — starting from fresh LoRA init")
+        lora_config = LoraConfig(
+            r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+            target_modules=target_modules, bias="none",
+        )
+        model = get_peft_model(model, lora_config)
 
     trainable, total = 0, 0
     for _, p in model.named_parameters():
@@ -53,7 +72,6 @@ def attach_lora(
 
 if __name__ == "__main__":
     from transformers import WhisperForConditionalGeneration
-    from step3_load_whisper import load_whisper
 
     _, model = load_whisper()
     print("\n-- Step 4: Attaching LoRA adapters --")

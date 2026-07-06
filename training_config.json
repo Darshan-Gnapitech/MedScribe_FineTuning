@@ -28,5 +28,5 @@
   "adam_beta2": 0.999,
   "max_grad_norm": 1.0,
   "early_stopping_patience": 5,
-  "eval_steps": 322
+  "eval_steps": 200
 }

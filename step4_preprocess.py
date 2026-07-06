@@ -18,6 +18,7 @@ from transformers import WhisperProcessor
 from datasets import Dataset
 from datasets import disable_caching
 disable_caching()
+import soundfile as sf
 """
 Step 5: Preprocess the Dataset
 ================================
@@ -32,7 +33,7 @@ class MedicalWhisperPreprocessor:
     def __init__(
         self,
         processor: WhisperProcessor,
-        audio_column: str = "audio_array",
+        audio_column: str = "audio",
         transcript_column: str = "sentence",
     ):
         self.processor = processor
@@ -48,9 +49,14 @@ class MedicalWhisperPreprocessor:
                     print(f"    {split_name}: {i}/{n}")
 
                 example = split_dataset[i]
-                audio = example[self.audio_column]
+                audio_path = example["audio"]["path"]
+
+
+                audio, sr = sf.read(
+                    audio_path,
+                    dtype="float32"
+                )
                 text = example[self.transcript_column]
-                audio = audio if isinstance(audio, list) else audio.tolist()
 
                 features = self.processor.feature_extractor(
                     audio,
