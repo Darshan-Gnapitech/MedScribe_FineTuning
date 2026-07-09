@@ -28,15 +28,15 @@ class MedicalWhisperTrainingConfig:
     NOT passed to Seq2SeqTrainingArguments — train.py owns the loop."""
 
     output_dir: str = "./whisper-medical-lora"
-    per_device_train_batch_size: int = 1
-    per_device_eval_batch_size: int = 1
-    gradient_accumulation_steps: int = 8
+    per_device_train_batch_size: int = 8
+    per_device_eval_batch_size: int = 8
+    gradient_accumulation_steps: int = 1
     learning_rate: float = 1e-4
     warmup_steps: int = 50
     num_train_epochs: int = 10
     gradient_checkpointing: bool = True
-    fp16: bool = True
-    bf16: bool = False
+    fp16: bool = False
+    bf16: bool = True
     eval_strategy: str = "epoch"
     save_strategy: str = "epoch"
     logging_steps: int = 10
@@ -49,17 +49,18 @@ class MedicalWhisperTrainingConfig:
     weight_decay: float = 0.01
 
     # custom fields — NOT part of Seq2SeqTrainingArguments
-    num_workers: int = 0
+    num_workers: int = 4
     early_stopping_patience: int = 3
     adam_beta1: float = 0.9
     adam_beta2: float = 0.98
-    eval_steps: int = 40
+    eval_steps: int = 200
     max_grad_norm: float = 1.0
+    max_vram_gb: float = 20.0
 
 
 
     _CUSTOM_FIELDS = {
-        "num_workers", "early_stopping_patience", "adam_beta1", "adam_beta2"
+        "num_workers", "early_stopping_patience", "adam_beta1", "adam_beta2", "max_vram_gb"
     }
     
 

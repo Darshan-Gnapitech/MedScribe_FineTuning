@@ -35,6 +35,17 @@ from model_export import export_best_weights
 # 2. Early stopping state
 # ============================================================================
 
+
+def limit_gpu_memory(max_gb: float, device_idx: int = 0):
+    if not torch.cuda.is_available():
+        return
+    total_gb = torch.cuda.get_device_properties(
+        device_idx).total_memory / (1024**3)
+    fraction = min(max_gb / total_gb, 1.0)
+    torch.cuda.set_per_process_memory_fraction(fraction, device=device_idx)
+    print(f"[train] GPU memory capped to {max_gb:.1f} GB "
+          f"({fraction:.1%} of {total_gb:.1f} GB total) on device {device_idx}")
+    
 @dataclass
 class EarlyStoppingState:
     patience: int = 5
@@ -190,6 +201,7 @@ def train(
 
     # ── Device + precision setup ─────────────────────────────────────────────
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    limit_gpu_memory(training_config.max_vram_gb, device_idx=0)
     use_amp = (
         training_config.bf16 or training_config.fp16) and torch.cuda.is_available()
 
