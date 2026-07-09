@@ -21,10 +21,10 @@ def main():
     print("WHISPER MEDICAL LoRA — FULL PIPELINE")
     print("=" * 60)
     EXPORT_DIR = "./whisper-medical-lora/exported_best"
-    CSV_PATH = r"D:\files (5)\files (5)\input_dir\datasets.xlsx"
+    CSV_PATH = r"./pocfinal/datasets.xlsx"
 
 
-    OUTPUT_DIR = r"D:\files (5)\files (5)"
+    OUTPUT_DIR = r"./"
 
     build_info = build_dataset(
         csv_path=CSV_PATH,

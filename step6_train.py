@@ -153,7 +153,6 @@ def run_validation(
                 no_speech_threshold=0.6,                       # catches silence/no-speech chunks
             )
             model.config.use_cache = False
-            print(predicted_ids)
             decoded = processor.batch_decode(
                 predicted_ids, skip_special_tokens=True)
             preds.extend(decoded)
@@ -161,14 +160,6 @@ def run_validation(
 
     val_loss = float(np.mean(losses))
     val_wer = compute_wer(refs, preds)
-
-    import random
-
-    print("\n===== RANDOM SAMPLE PREDICTIONS =====")
-    for i in random.sample(range(len(refs)), min(5, len(refs))):
-        print("REF ", i, " :", refs[i])
-        print("PRED ", i, " :", preds[i])
-        print("-" * 50)
     model.train()
 
     return val_loss, val_wer

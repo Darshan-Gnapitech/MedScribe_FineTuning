@@ -80,18 +80,32 @@ GAP_SEARCH_WINDOW_SEC = 3.0   # how far to look for a nearby VAD silence gap
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".flac",
                     ".ogg", ".aac", ".wma", ".opus")
 
+
 def replace_numbers(text):
     def repl(match):
         return num2words(int(match.group(0)))
     return re.sub(r'\d+', repl, text)
+
 
 def find_pairs_from_csv(csv_path: str, converted_dir: str) -> list:
     """
     Supports both CSV and XLSX manifests.
 
     Required columns:
-        conversation_id
-        Audio
+        audio_path
+        transcript
+
+    Optional columns:
+        conversation_id  -> if missing (as a column, or blank/NaN on a
+                             given row), falls back to a 1-based sequential
+                             id (1, 2, 3, ...) so the script still works on
+                             manifests that don't track a conversation id.
+                             This id is only used for [skip]/[error] log
+                             messages -- it does NOT affect file naming.
+
+    File naming: the converted wav (and every chunk derived from it) keeps
+    the source audio file's own name, e.g. 1.mp3 -> 1.wav -> 1_chunk000.wav,
+    1_chunk001.wav, ... 2.mp3 -> 2.wav -> 2_chunk000.wav, ...
     """
     manifest_dir = os.path.dirname(os.path.abspath(csv_path))
     check_ffmpeg_available()
@@ -108,22 +122,38 @@ def find_pairs_from_csv(csv_path: str, converted_dir: str) -> list:
             f"Unsupported file type: {ext}. Use .csv or .xlsx"
         )
 
+    has_conv_id_col = "conversation_id" in df.columns
+
+    # Zero-pad width scales with the number of rows (minimum 3 digits), so
+    # ids stay sortable/aligned as conv_001, conv_002, ... conv_123, etc.
+    id_width = max(3, len(str(len(df))))
+
+    def pad_id(raw_id: str) -> str:
+        return raw_id.zfill(id_width) if raw_id.isdigit() else raw_id
+
     pairs = []
 
-    for _, row in df.iterrows():
-        conv_id = str(row["conversation_id"]).strip()
-        src_path = str(row["Audio"]).strip()
+    for row_idx, (_, row) in enumerate(df.iterrows(), start=1):
+        raw_conv_id = str(row["conversation_id"]
+                          ).strip() if has_conv_id_col else ""
+        if raw_conv_id and raw_conv_id.lower() != "nan":
+            conv_id = pad_id(raw_conv_id)
+        else:
+            # No conversation_id column, or blank/NaN for this row ->
+            # fall back to sequential numbering (001, 002, 003, ...).
+            conv_id = pad_id(str(row_idx))
 
+        src_path = str(row["audio_path"]).strip()
 
         if not os.path.isabs(src_path):
             src_path = os.path.join(manifest_dir, src_path)
 
         src_path = os.path.normpath(src_path)
-        transcript = str(row["original convo(input)"]).strip()
+        transcript = str(row["transcript"]).strip()
 
         if not transcript or transcript.lower() == "nan":
             print(
-                f"  [skip] {conv_id}: empty transcript in column 'original convo(input)'"
+                f"  [skip] : empty transcript in column 'transcript'"
             )
             continue
 
@@ -133,7 +163,10 @@ def find_pairs_from_csv(csv_path: str, converted_dir: str) -> list:
             )
             continue
 
-        base_name = f"conv_{conv_id}"
+        # Name the converted wav (and everything derived from it, i.e. every
+        # chunk) after the source audio file itself, e.g. 1.mp3 -> 1.wav ->
+        # 1_chunk000.wav, 1_chunk001.wav, ... rather than a conv_{id} prefix.
+        base_name = os.path.splitext(os.path.basename(src_path))[0]
         wav_path = os.path.join(converted_dir, base_name + ".wav")
 
         if os.path.exists(wav_path):
@@ -153,6 +186,7 @@ def find_pairs_from_csv(csv_path: str, converted_dir: str) -> list:
         pairs.append((base_name, wav_path, transcript))
 
     return pairs
+
 
 def check_ffmpeg_available():
     if shutil.which("ffmpeg") is None:
@@ -405,6 +439,15 @@ def build_chunks(word_times: list, silence_gaps: list, max_chunk_sec: float = MA
             chunks.append(chunk_words)
         i = cut_idx if cut_idx > i else i + 1  # safety: always advance
 
+    # Guarantee at least one chunk for any file that has a transcript at
+    # all. Without this, a short recording (e.g. under MIN_CHUNK_SEC, or
+    # generally under the max_chunk_sec limit) whose single natural chunk
+    # gets filtered above would silently produce ZERO chunks -> the file
+    # never gets a chunk000, never lands in chunks/, and never appears in
+    # chunks_manifest.csv. Short files must still surface as one chunk.
+    if not chunks and n > 0:
+        chunks.append(word_times[:])
+
     return chunks
 
 
@@ -596,8 +639,8 @@ def build_dataset(
     if not pairs:
         print(
             "\nNo valid pairs found. Check that:\n"
-            "  1) --csv_path points to a CSV with columns: conversation_id, Audio, "
-            f"and 'original convo (input)'\n"
+            "  1) --csv_path points to a CSV with columns: Audio, "
+            f"'transcript' (conversation_id is optional)\n"
             "  2) the 'Audio' column holds paths that actually exist on disk\n"
             "  3) ffmpeg is installed and on PATH (ffmpeg -version to check)"
         )
@@ -618,7 +661,7 @@ def build_dataset(
 
             for fname in df_manifest["audio_file"]:
                 base = re.sub(r"_chunk\d+\.wav$", "", fname)
-                processed_files.add(base)   
+                processed_files.add(base)
         except pd.errors.EmptyDataError:
             pass
 
@@ -641,7 +684,6 @@ def build_dataset(
         all_validations.append(validation)
 
     manifest_exists = os.path.exists(manifest_path)
-
 
     with open(manifest_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -686,6 +728,7 @@ def build_dataset(
         "validation_report": validation_report_path,
         "num_chunks": len(all_rows),
     }
+
 
 if __name__ == "__main__":
     build_dataset(csv_path="path/to/your.csv", output_dir="path/to/output")

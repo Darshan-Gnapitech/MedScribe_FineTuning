@@ -24,38 +24,44 @@ class MedicalWhisperTrainingConfig:
     """Hyper-parameters for the custom training loop (train.py).
     NOT passed to Seq2SeqTrainingArguments — train.py owns the loop."""
 
+    """Hyper-parameters for the custom training loop (train.py).
+    NOT passed to Seq2SeqTrainingArguments — train.py owns the loop."""
+
     output_dir: str = "./whisper-medical-lora"
-    logging_dir: str = "./logs"
-    optim: str = "adamw_torch"
-    learning_rate: float = 2e-4
-    weight_decay: float = 0.01
-    lr_scheduler_type: str = "linear"
-    warmup_steps: int = 10
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 1
-    gradient_accumulation_steps: int = 8   # keeps effective batch size ~16
+    gradient_accumulation_steps: int = 8
+    learning_rate: float = 1e-4
+    warmup_steps: int = 50
+    num_train_epochs: int = 10
+    gradient_checkpointing: bool = True
     fp16: bool = True
     bf16: bool = False
-    num_train_epochs: int = 10
-    max_steps: int = -1
     eval_strategy: str = "epoch"
     save_strategy: str = "epoch"
+    logging_steps: int = 10
     load_best_model_at_end: bool = True
     metric_for_best_model: str = "wer"
     greater_is_better: bool = False
-    logging_steps: int = 20
-    report_to: str = "tensorboard"
     predict_with_generate: bool = True
-    generation_max_length: int = 448
-    seed: int = 42
+    generation_max_length: int = 225
+    report_to: str = "none"
+    weight_decay: float = 0.01
 
-    # Custom fields — used directly by train.py, not passed to HF Trainer
+    # custom fields — NOT part of Seq2SeqTrainingArguments
     num_workers: int = 0
+    early_stopping_patience: int = 3
     adam_beta1: float = 0.9
-    adam_beta2: float = 0.999
+    adam_beta2: float = 0.98
+    eval_steps: int = 40
     max_grad_norm: float = 1.0
-    early_stopping_patience: int = 5
-    eval_steps: int = 200
+
+
+
+    _CUSTOM_FIELDS = {
+        "num_workers", "early_stopping_patience", "adam_beta1", "adam_beta2"
+    }
+    
 
     def save(self, path: str = "training_config.json"):
         with open(path, "w") as f:
