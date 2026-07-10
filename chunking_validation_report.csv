@@ -1,0 +1,1 @@
+source_file,passed,total_words,chunked_words,dropped_words,order_preserved,word_coverage_pct,num_chunks,chunks_over_limit,longest_chunk_sec,avg_chunk_sec,total_internal_cuts,cuts_on_pause,pause_alignment_pct,error
