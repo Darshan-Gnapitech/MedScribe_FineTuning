@@ -1,56 +1,48 @@
+"""
+load_chunk_dataset.py
+========================
+Loads the pre-split train/validation/test CSVs produced by
+split_chunk_dataset() into a HuggingFace DatasetDict. No shuffling or
+splitting happens here anymore — that's already baked into the CSVs.
+"""
+
 from datasets import Dataset, DatasetDict, Audio
 import pandas as pd
 import os
 
 
-SEED = 42
+def _load_split(split_name, output_dir):
+    split_dir = os.path.join(output_dir, split_name)
+    csv_path = os.path.join(split_dir, f"{split_name}.csv")
+    audio_dir = os.path.join(split_dir, "audio_files")
 
-
-def load_chunk_dataset(
-    manifest_path,
-    chunks_dir,
-):
-    print("=" * 60)
-    print("STEP 1: Loading chunk dataset")
-    print("=" * 60)
-
-    df = pd.read_csv(manifest_path)
+    df = pd.read_csv(csv_path)
 
     df["audio"] = df["audio_file"].apply(
-        lambda x: os.path.join(chunks_dir, x)
+        lambda x: os.path.join(audio_dir, x)
     )
 
-    df.rename(
-        columns={"transcript": "sentence"},
-        inplace=True
-    )
-
+    df.rename(columns={"transcript": "sentence"}, inplace=True)
     df = df[["audio", "sentence"]]
 
-    dataset = Dataset.from_pandas(
-        df,
-        preserve_index=False
-    )
-
+    dataset = Dataset.from_pandas(df, preserve_index=False)
     dataset = dataset.cast_column(
         "audio",
-        Audio(sampling_rate=16000,decode=False)
+        Audio(sampling_rate=16000, decode=False)
     )
 
-    shuffled = dataset.shuffle(seed=SEED)
+    return dataset
 
-    n = len(shuffled)
-    val_size = int(n * 0.15)
-    test_size = int(n * 0.15)
+
+def load_chunk_dataset(output_dir):
+    print("=" * 60)
+    print("STEP 1: Loading pre-split chunk dataset")
+    print("=" * 60)
 
     dataset = DatasetDict({
-        "validation": shuffled.select(range(val_size)),
-        "test": shuffled.select(
-            range(val_size, val_size + test_size)
-        ),
-        "train": shuffled.select(
-            range(val_size + test_size, n)
-        ),
+        "train": _load_split("train", output_dir),
+        "validation": _load_split("validation", output_dir),
+        "test": _load_split("test", output_dir),
     })
 
     print(
@@ -60,3 +52,7 @@ def load_chunk_dataset(
     )
 
     return dataset
+
+
+if __name__ == "__main__":
+    load_chunk_dataset(output_dir="path/to/output")

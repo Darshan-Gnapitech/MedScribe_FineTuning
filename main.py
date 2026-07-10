@@ -7,6 +7,7 @@ Orchestrates Steps 1-10 in order.
 
 from matplotlib.pylab import sample
 import torch
+from step0_A_dataset_Split import split_chunk_dataset
 from step0_build_dataset import build_dataset
 from step1_load_dataset import load_chunk_dataset
 from step2_load_whisper import load_whisper, run_sanity_check, print_deliverable
@@ -24,16 +25,15 @@ def main():
     CSV_PATH = r"./pocfinal/datasets.xlsx"
 
 
-    OUTPUT_DIR = r"./"
+    # OUTPUT_DIR = r"./"
 
-    build_info = build_dataset(
-        csv_path=CSV_PATH,
-        output_dir=OUTPUT_DIR,
-    )
-    dataset = load_chunk_dataset(
-        manifest_path=build_info["manifest_path"],
-        chunks_dir=build_info["chunks_dir"],
-    )   
+    # build_info = build_dataset(
+    #     csv_path=CSV_PATH,
+    #     output_dir=OUTPUT_DIR,
+    # )
+    # split_chunk_dataset(input_dir=".", output_dir="./splits")
+
+    dataset = load_chunk_dataset(output_dir="./datasets")
     sample = dataset["train"][0]
     arr, sr = sf.read(
         sample["audio"]["path"],
