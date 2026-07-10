@@ -8,6 +8,6 @@ pandas==2.3.3
 peft==0.19.1
 python-dotenv==1.2.1
 soundfile==0.13.1
-torch==2.5.1+cu121
-torchaudio==2.5.1+cu121
+torch==2.5.1
+torchaudio==2.5.1
 transformers==4.57.3

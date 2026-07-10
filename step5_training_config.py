@@ -26,7 +26,7 @@ class MedicalWhisperTrainingConfig:
 
     """Hyper-parameters for the custom training loop (train.py).
     NOT passed to Seq2SeqTrainingArguments — train.py owns the loop."""
-
+    model_name_or_path:str = "/home/nisha/whisper-large-v3-hf"
     output_dir: str = "./whisper-medical-lora"
     per_device_train_batch_size: int = 8
     per_device_eval_batch_size: int = 8
@@ -124,17 +124,22 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
 def build_compute_metrics(processor: WhisperProcessor):
     """WER metric function compatible with Seq2SeqTrainer."""
-    wer_metric = evaluate.load("wer")
 
     def compute_metrics(pred):
         pred_ids = pred.predictions
         label_ids = pred.label_ids
         label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
         pred_str = processor.tokenizer.batch_decode(
-            pred_ids,  skip_special_tokens=True)
+            pred_ids, skip_special_tokens=True)
         label_str = processor.tokenizer.batch_decode(
             label_ids, skip_special_tokens=True)
-        return {"wer": round(wer_metric.compute(predictions=pred_str, references=label_str), 4)}
+
+        # jiwer.wer errors on empty reference strings, so guard against that
+        pred_str = [p if p.strip() else " " for p in pred_str]
+        label_str = [l if l.strip() else " " for l in label_str]
+
+        wer = jiwer.wer(label_str, pred_str)
+        return {"wer": round(wer, 4)}
 
     return compute_metrics
 

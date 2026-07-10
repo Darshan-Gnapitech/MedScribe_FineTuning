@@ -23,6 +23,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.amp import GradScaler, autocast
 
 from transformers import (
+    GenerationConfig,
     WhisperProcessor,
     get_linear_schedule_with_warmup,
     loss,
@@ -155,13 +156,6 @@ def run_validation(
             predicted_ids = model.generate(
                 input_features=features,
                 max_new_tokens=200,
-                language="en",
-                task="transcribe",
-                temperature=(0.0, 0.2, 0.4, 0.6, 0.8,
-                             1.0),    # fallback ladder
-                compression_ratio_threshold=2.4,               # catches repetition/garbage
-                logprob_threshold=-1.0,                        # catches low-confidence collapse
-                no_speech_threshold=0.6,                       # catches silence/no-speech chunks
             )
             model.config.use_cache = False
             decoded = processor.batch_decode(
@@ -198,6 +192,7 @@ def train(
         }
     """
     import math
+    model.generation_config = GenerationConfig.from_pretrained(training_config.model_name_or_path)
 
     # ── Device + precision setup ─────────────────────────────────────────────
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -223,9 +218,10 @@ def train(
 
     mel_shape = torch.tensor(sample["input_features"]).shape
 
-    assert mel_shape == torch.Size([80, 3000]), (
-        f"Expected mel shape (80, 3000), got {mel_shape}"
-    )
+    expected_bins = processor.feature_extractor.feature_size
+
+    assert mel_shape == torch.Size([expected_bins, 3000]), (
+    f"Expected mel shape ({expected_bins}, 3000), got {mel_shape}")
     labels = torch.tensor(sample["labels"])
     print("Labels:", processor.tokenizer.decode(
         labels[0]), len(processor.tokenizer.decode(labels.tolist())))

@@ -66,19 +66,69 @@ import torch
 import torchaudio
 import soundfile as sf
 import numpy as np
-
+import threading 
+import itertools
+import time 
+import socket 
+from pathlib import Path
 TARGET_SR = 16_000
 MAX_CHUNK_SEC = 28.0          # keep buffer under Whisper's 30s window
 MIN_CHUNK_SEC = 2.0           # discard degenerate tiny leftover chunks
 GAP_SEARCH_WINDOW_SEC = 3.0   # how far to look for a nearby VAD silence gap
+DOWNLOAD_TIMEOUT=300
+SPINNER_INTERVAL=0.15
 
-
+TORCH_HUB=Path.home()/".cache"/"torch"/"hub"
+SILERO_CACHE=next(TORCH_HUB.glob("snakers4_silero-vad*"),None)
+MMS_CACHE=TORCH_HUB/"checkpoints"/"model.pt"
 # =============================================================================
 # 0. Universal audio -> standardized WAV conversion (ffmpeg)
 # =============================================================================
 
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".flac",
                     ".ogg", ".aac", ".wma", ".opus")
+
+class Spinner:
+
+    def __init__(self, text):
+
+        self.text = text
+
+        self.running = False
+
+        self.thread = None
+
+    def start(self):
+
+        self.running = True
+
+        def run():
+
+            for c in itertools.cycle("|/-\\"):
+
+                if not self.running:
+
+                    break
+
+                print(f"\r{self.text} {c}", end="", flush=True)
+
+                time.sleep(SPINNER_INTERVAL)
+
+        self.thread = threading.Thread(target=run)
+
+        self.thread.daemon = True
+
+        self.thread.start()
+
+    def stop(self, msg="Done"):
+
+        self.running = False
+
+        if self.thread:
+
+            self.thread.join()
+
+        print(f"\r{msg}{' '*40}")
 
 
 def replace_numbers(text):
@@ -290,13 +340,54 @@ def load_audio(path: str) -> torch.Tensor:
 # =============================================================================
 
 def load_vad():
-    model, utils = torch.hub.load(repo_or_dir="snakers4/silero-vad", model="silero_vad",
-                                  force_reload=False,
-                                  onnx=False,
-                                  )
-    get_speech_timestamps = utils[0]
-    return model, get_speech_timestamps
+    if next(TORCH_HUB.glob("snakers4_silero-vad*"), None):
+        print("✓ Silero VAD found in cache.")
+        model, utils = torch.hub.load(
+            "snakers4/silero-vad",
+            "silero_vad",
+            trust_repo=True,
+            force_reload=False,
+            onnx=False,
+        )
+        return model, utils[0]
+    print("Silero VAD not found in cache.")
+    print("Downloading Silero VAD...")
+    spinner = Spinner("Downloading")
+    spinner.start()
+    result = {}
+    error = {}
+    def worker():
+        try:
+            model, utils = torch.hub.load(
+                    "snakers4/silero-vad",
+                    "silero_vad",
+                    trust_repo=True,
+                    force_reload=False,
+                    onnx=False,
+                    )
+            result["model"] = model
+            result["utils"] = utils
+        except Exception as e:
+            error["e"] = e
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=DOWNLOAD_TIMEOUT)
+    spinner.stop()
+    if t.is_alive():
+        raise RuntimeError(
+            f"""
 
+Silero VAD download timed out after {DOWNLOAD_TIMEOUT} seconds.
+Possible reasons:
+• Internet connection unavailable
+• GitHub temporarily unreachable
+• Firewall/proxy blocking GitHub
+Please connect to the internet and try again.
+"""     )
+    if error:
+        raise RuntimeError(f"Failed to download Silero VAD:\n{error['e']}")
+    print("✓ Silero VAD downloaded successfully.")
+    return result["model"], result["utils"][0]
 
 def get_silence_gaps(wav: torch.Tensor, vad_model, get_speech_timestamps) -> list:
     """Returns list of (gap_start_sec, gap_end_sec) between detected speech regions."""
@@ -314,12 +405,36 @@ def get_silence_gaps(wav: torch.Tensor, vad_model, get_speech_timestamps) -> lis
 # 3. wav2vec2 forced alignment (torchaudio MMS_FA)
 # =============================================================================
 
-def load_aligner(device: str):
-    bundle = torchaudio.pipelines.MMS_FA
-    model = bundle.get_model().to(device)
-    tokenizer = bundle.get_tokenizer()
-    aligner = bundle.get_aligner()
-    return model, tokenizer, aligner
+import torch
+
+import torchaudio
+import torchaudio.pipelines._wav2vec2.utils as utils
+mms_fa="/root/models/mms-fa/model.pt"
+def load_aligner(device):
+    try:
+        print("Loading local MMS_FA model...")
+        original = utils.load_state_dict_from_url
+        def local_loader(url, *args, **kwargs):
+            print(f"Loading MMS_FA from {mms_fa}")
+            return torch.load(mms_fa, map_location=device)
+        # Create MMS_FA model architecture
+        try:
+            utils.load_state_dict_from_url = local_loader
+            bundle = torchaudio.pipelines.MMS_FA
+            model = bundle.get_model()
+        finally:
+            torch.hub.load_state_dict_from_url = original
+        # Load your .pt weights
+        # Load weights
+        model = model.to(device)
+        model.eval()
+        tokenizer = bundle.get_tokenizer()
+        aligner = bundle.get_aligner()
+        print("✓ MMS_FA loaded from local .pt")
+        return model, tokenizer, aligner
+    except Exception as e:
+        raise RuntimeError(f"Failed to load local MMS_FA model:\n{e}")
+ 
 
 
 def clean_transcript(text: str) -> str:
@@ -645,11 +760,35 @@ def build_dataset(
             "  3) ffmpeg is installed and on PATH (ffmpeg -version to check)"
         )
         return
+    try:
 
-    print("Loading Silero VAD ...")
-    vad_model, get_speech_timestamps = load_vad()
-    print("Loading torchaudio MMS_FA (wav2vec2 forced aligner) ...")
-    align_model, tokenizer, aligner = load_aligner(device)
+        print("Loading Silero VAD...")
+
+        vad_model, get_speech_timestamps = load_vad()
+        print()
+        print("Loading MMS Forced Alignment...")
+
+        align_model, tokenizer, aligner = load_aligner(device)
+
+    except RuntimeError as e:
+    
+        print("\n" + "=" * 70)
+    
+        print("MODEL INITIALIZATION FAILED")
+    
+        print("=" * 70)
+    
+        print(e)
+    
+        print("""
+The required models could not be loaded.
+If this is your first run:
+    • Connect to the internet
+    • Re-run the script
+After the first successful download, everything will run completely offline.
+""")
+        return
+
 
     all_rows = []
     all_validations = []
