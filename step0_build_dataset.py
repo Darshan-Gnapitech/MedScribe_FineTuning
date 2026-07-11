@@ -423,7 +423,7 @@ def load_aligner(device):
             bundle = torchaudio.pipelines.MMS_FA
             model = bundle.get_model()
         finally:
-            torch.hub.load_state_dict_from_url = original
+            utils.load_state_dict_from_url = original
         # Load your .pt weights
         # Load weights
         model = model.to(device)
@@ -445,41 +445,35 @@ def clean_transcript(text: str) -> str:
 
 
 def compute_emission_windowed(wav, model, device, window_sec=30.0, overlap_sec=1.0):
-    """
-    Computes the wav2vec2 emission over a long waveform by running the
-    model on short overlapping windows and stitching results into one
-    continuous emission sequence. A single forward pass over 40+ minutes
-    is not feasible — self-attention memory scales with sequence length
-    squared. This keeps each forward pass small; only the (cheap, DP-based)
-    alignment step afterward runs on the full stitched sequence.
-    """
     total_samples = wav.shape[0]
     window_samples = int(window_sec * TARGET_SR)
     overlap_samples = int(overlap_sec * TARGET_SR)
     step_samples = max(1, window_samples - overlap_samples)
 
+    total_windows = max(1, (total_samples // step_samples) + 1)
     emissions = []
     start = 0
+    window_idx = 0
     with torch.inference_mode():
         while start < total_samples:
             end = min(start + window_samples, total_samples)
             window = wav[start:end].unsqueeze(0).to(device)
-            print(window.shape, window.shape[-1] / 16000)
-            MIN_WINDOW_SAMPLES = 8000  # 0.5 second
+            MIN_WINDOW_SAMPLES = 8000
             if window.shape[-1] < MIN_WINDOW_SAMPLES:
                 break
-            emission, _ = model(window)          # (1, frames, vocab)
+            window_idx += 1
+            if window_idx == 1 or window_idx % 10 == 0 or end >= total_samples:
+                print(f"    [align] window {window_idx}/{total_windows} "
+                    f"({window.shape[-1] / TARGET_SR:.1f}s)")
+            emission, _ = model(window)
             frames_per_sample = emission.shape[1] / window.shape[1]
-
             if end < total_samples:
-                # drop the overlapping tail so stitched frames aren't duplicated
                 drop_frames = int(overlap_samples * frames_per_sample)
                 emission = emission[:, : emission.shape[1] - drop_frames, :]
-
-            emissions.append(emission[0])         # (frames, vocab)
+            emissions.append(emission[0])
             start += step_samples
 
-    return torch.cat(emissions, dim=0)            # (total_frames, vocab)
+    return torch.cat(emissions, dim=0)         # (total_frames, vocab)
 
 
 def force_align(wav: torch.Tensor, transcript: str, model, tokenizer, aligner, device: str):
@@ -739,47 +733,38 @@ def build_dataset(
     output_dir: str,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
+    print(f"[build] device: {device}")
 
     converted_dir = os.path.join(output_dir, "converted_wavs")
     chunks_dir = os.path.join(output_dir, "chunks")
     os.makedirs(chunks_dir, exist_ok=True)
     manifest_path = os.path.join(output_dir, "chunks_manifest.csv")
+    validation_report_path = os.path.join(
+        output_dir, "chunking_validation_report.csv")
 
-    print("Reading CSV manifest and converting audio to standardized WAV (ffmpeg) ...")
-    pairs = find_pairs_from_csv(
-        csv_path, converted_dir)
-    print(f"Found {len(pairs)} valid audio+transcript pairs after conversion.")
+    print("[build] reading manifest and converting audio (ffmpeg) ...")
+    pairs = find_pairs_from_csv(csv_path, converted_dir)
+    print(
+        f"[build] {len(pairs)} valid audio+transcript pairs after conversion")
 
     if not pairs:
-        print(
-            "\nNo valid pairs found. Check that:\n"
-            "  1) --csv_path points to a CSV with columns: Audio, "
-            f"'transcript' (conversation_id is optional)\n"
-            "  2) the 'Audio' column holds paths that actually exist on disk\n"
-            "  3) ffmpeg is installed and on PATH (ffmpeg -version to check)"
-        )
+        print("\nNo valid pairs found. Check that:\n"
+              "  1) --csv_path points to a CSV with columns: Audio, "
+              "'transcript' (conversation_id is optional)\n"
+              "  2) the 'Audio' column holds paths that actually exist on disk\n"
+              "  3) ffmpeg is installed and on PATH (ffmpeg -version to check)")
         return
+
     try:
-
-        print("Loading Silero VAD...")
-
+        print("[build] loading Silero VAD ...")
         vad_model, get_speech_timestamps = load_vad()
-        print()
-        print("Loading MMS Forced Alignment...")
-
+        print("[build] loading MMS forced alignment model ...")
         align_model, tokenizer, aligner = load_aligner(device)
-
     except RuntimeError as e:
-    
         print("\n" + "=" * 70)
-    
         print("MODEL INITIALIZATION FAILED")
-    
         print("=" * 70)
-    
         print(e)
-    
         print("""
 The required models could not be loaded.
 If this is your first run:
@@ -789,83 +774,97 @@ After the first successful download, everything will run completely offline.
 """)
         return
 
-
-    all_rows = []
-    all_validations = []
-    total_files = len(pairs)
+    # ── Already-processed check, chunked read (memory-lean at millions of rows) ──
     processed_files = set()
     if os.path.exists(manifest_path) and os.path.getsize(manifest_path) > 0:
         try:
-            df_manifest = pd.read_csv(manifest_path)
-
-            for fname in df_manifest["audio_file"]:
-                base = re.sub(r"_chunk\d+\.wav$", "", fname)
-                processed_files.add(base)
+            print(
+                f"[build] scanning existing manifest for already-processed files ...")
+            t0 = time.time()
+            for chunk in pd.read_csv(manifest_path, usecols=["audio_file"], chunksize=100_000):
+                for fname in chunk["audio_file"]:
+                    processed_files.add(re.sub(r"_chunk\d+\.wav$", "", fname))
+            print(f"[build] {len(processed_files):,} source files already processed "
+                  f"({time.time() - t0:.2f}s)")
         except pd.errors.EmptyDataError:
-            pass
+            print("[build] manifest exists but is empty — treating as fresh start")
 
-    for file_idx, (base_name, wav_path, transcript) in enumerate(pairs, start=1):
-        expected_chunk = os.path.join(
-            chunks_dir,
-            f"{base_name}_chunk000.wav"
-        )
-        if base_name in processed_files and os.path.exists(expected_chunk):
-            print(f"[skip] {base_name} already processed")
-            continue
-        print(
-            f"\n=== Processing file {file_idx}/{total_files}: {base_name} ===", flush=True)
-        rows, validation = process_file(
-            wav_path, transcript, chunks_dir,
-            vad_model, get_speech_timestamps,
-            align_model, tokenizer, aligner, device,
-        )
-        all_rows.extend(rows)
-        all_validations.append(validation)
+    # ── Open both output files ONCE, in append mode, and flush after every file ──
+    manifest_exists = os.path.exists(
+        manifest_path) and os.path.getsize(manifest_path) > 0
+    report_exists = os.path.exists(
+        validation_report_path) and os.path.getsize(validation_report_path) > 0
 
-    manifest_exists = os.path.exists(manifest_path)
-
-    with open(manifest_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-
-        if not manifest_exists:
-            writer.writerow(["audio_file", "transcript"])
-
-        writer.writerows(all_rows)
-
-    validation_report_path = os.path.join(
-        output_dir, "chunking_validation_report.csv")
     fieldnames = [
         "source_file", "passed", "total_words", "chunked_words", "dropped_words",
         "order_preserved", "word_coverage_pct", "num_chunks", "chunks_over_limit",
         "longest_chunk_sec", "avg_chunk_sec", "total_internal_cuts",
         "cuts_on_pause", "pause_alignment_pct", "error",
     ]
-    report_exists = os.path.exists(validation_report_path)
-    with open(validation_report_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
 
+    total_files = len(pairs)
+    total_chunks_written = 0
+    total_passed = 0
+    total_failed = 0
+
+    with open(manifest_path, "a", newline="", encoding="utf-8") as manifest_f, \
+            open(validation_report_path, "a", newline="", encoding="utf-8") as report_f:
+
+        manifest_writer = csv.writer(manifest_f)
+        if not manifest_exists:
+            manifest_writer.writerow(["audio_file", "transcript"])
+
+        report_writer = csv.DictWriter(report_f, fieldnames=fieldnames)
         if not report_exists:
-            writer.writeheader()
+            report_writer.writeheader()
 
-        for v in all_validations:
-            writer.writerow({k: v.get(k, "") for k in fieldnames})
+        for file_idx, (base_name, wav_path, transcript) in enumerate(pairs, start=1):
+            expected_chunk = os.path.join(
+                chunks_dir, f"{base_name}_chunk000.wav")
+            if base_name in processed_files and os.path.exists(expected_chunk):
+                print(
+                    f"[skip] ({file_idx}/{total_files}) {base_name} already processed")
+                continue
 
-    failed = [v for v in all_validations if not v.get("passed")]
-    print(f"\nDone. {len(all_rows)} chunks written to {chunks_dir}")
-    print(f"Manifest saved to {manifest_path}")
-    print(f"Chunking validation report saved to {validation_report_path}")
-    print(
-        f"Validation: {len(all_validations) - len(failed)}/{len(all_validations)} files passed")
-    if failed:
-        print("Files that FAILED chunking validation:")
-        for v in failed:
             print(
-                f"  - {v['source_file']}  ({v.get('error', 'see report for details')})")
+                f"\n=== Processing file {file_idx}/{total_files}: {base_name} ===", flush=True)
+            rows, validation = process_file(
+                wav_path, transcript, chunks_dir,
+                vad_model, get_speech_timestamps,
+                align_model, tokenizer, aligner, device,
+            )
+
+            # Flush THIS file's results to disk immediately — nothing sits
+            # in memory across files, and a crash on file N doesn't lose
+            # files 1..N-1's completed work.
+            manifest_writer.writerows(rows)
+            report_writer.writerow({k: validation.get(k, "")
+                                   for k in fieldnames})
+            manifest_f.flush()
+            report_f.flush()
+
+            total_chunks_written += len(rows)
+            if validation.get("passed"):
+                total_passed += 1
+            else:
+                total_failed += 1
+
+            print(f"[build] progress: {file_idx}/{total_files} files | "
+                  f"{total_chunks_written:,} chunks written so far | "
+                  f"{total_passed} passed / {total_failed} failed validation")
+
+    print(
+        f"\n[build] Done. {total_chunks_written:,} chunks written to {chunks_dir}")
+    print(f"[build] Manifest saved to {manifest_path}")
+    print(f"[build] Validation report saved to {validation_report_path}")
+    print(
+        f"[build] Validation: {total_passed}/{total_passed + total_failed} files passed")
+
     return {
         "manifest_path": manifest_path,
         "chunks_dir": chunks_dir,
         "validation_report": validation_report_path,
-        "num_chunks": len(all_rows),
+        "num_chunks": total_chunks_written,
     }
 
 

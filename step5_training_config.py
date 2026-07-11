@@ -7,8 +7,9 @@ Outputs: MedicalWhisperTrainingConfig, DataCollatorSpeechSeq2SeqWithPadding,
 """
 
 import json
+import os
 import torch
-import evaluate
+import jiwer
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List
 
@@ -26,7 +27,7 @@ class MedicalWhisperTrainingConfig:
 
     """Hyper-parameters for the custom training loop (train.py).
     NOT passed to Seq2SeqTrainingArguments — train.py owns the loop."""
-    model_name_or_path:str = "/home/nisha/whisper-large-v3-hf"
+    model_name_or_path: str =os.getenv("WHISPER_MODEL_NAME", "/home/nisha/whisper-large-v3-hf")
     output_dir: str = "./whisper-medical-lora"
     per_device_train_batch_size: int = 8
     per_device_eval_batch_size: int = 8
@@ -73,8 +74,6 @@ class MedicalWhisperTrainingConfig:
     def load(cls, path: str):
         with open(path) as f:
             return cls(**json.load(f))
-    _CUSTOM_FIELDS = {"num_workers",
-                    "early_stopping_patience", "adam_beta1", "adam_beta2"}
 
     def to_seq2seq_training_arguments(self) -> Seq2SeqTrainingArguments:
         d = {k: v for k, v in asdict(self).items()

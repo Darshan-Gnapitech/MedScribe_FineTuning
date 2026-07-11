@@ -1,14 +1,7 @@
-"""
-load_chunk_dataset.py
-========================
-Loads the pre-split train/validation/test CSVs produced by
-split_chunk_dataset() into a HuggingFace DatasetDict. No shuffling or
-splitting happens here anymore — that's already baked into the CSVs.
-"""
-
 from datasets import Dataset, DatasetDict, Audio
 import pandas as pd
 import os
+import time
 
 
 def _load_split(split_name, output_dir):
@@ -16,20 +9,23 @@ def _load_split(split_name, output_dir):
     csv_path = os.path.join(split_dir, f"{split_name}.csv")
     audio_dir = os.path.join(split_dir, "audio_files")
 
+    print(f"[load] reading {csv_path} ...")
+    t0 = time.time()
     df = pd.read_csv(csv_path)
+    print(
+        f"[load] {split_name}: {len(df):,} rows read ({time.time() - t0:.2f}s)")
 
-    df["audio"] = df["audio_file"].apply(
-        lambda x: os.path.join(audio_dir, x)
-    )
-
+    df["audio"] = df["audio_file"].apply(lambda x: os.path.join(audio_dir, x))
     df.rename(columns={"transcript": "sentence"}, inplace=True)
     df = df[["audio", "sentence"]]
 
     dataset = Dataset.from_pandas(df, preserve_index=False)
+    del df  # release pandas copy once HF Dataset (Arrow-backed) exists
+
     dataset = dataset.cast_column(
-        "audio",
-        Audio(sampling_rate=16000, decode=False)
-    )
+        "audio", Audio(sampling_rate=16000, decode=False))
+    print(
+        f"[load] {split_name}: Dataset built, audio decode is lazy (decode=False)")
 
     return dataset
 
@@ -46,9 +42,9 @@ def load_chunk_dataset(output_dir):
     })
 
     print(
-        f"train={len(dataset['train'])} "
-        f"val={len(dataset['validation'])} "
-        f"test={len(dataset['test'])}"
+        f"[load] train={len(dataset['train']):,} "
+        f"val={len(dataset['validation']):,} "
+        f"test={len(dataset['test']):,}"
     )
 
     return dataset

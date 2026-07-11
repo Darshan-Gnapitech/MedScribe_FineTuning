@@ -1,28 +1,26 @@
-"""
-Step 5: Preprocess the Dataset
-================================
-Converts raw audio arrays + corrected transcripts into model-ready tensors.
+import os
+import time
+import soundfile as sf
 
-Input columns expected from Step 2:
-    audio      : dict {"array": np.float32 array, "sampling_rate": int}
-    transcript : str  (doctor-corrected ground truth)
-
-Output columns (replaces all raw columns):
-    input_features : log-Mel spectrogram, shape (80, 3000)
-    labels         : token ids, padding replaced with -100
-"""
-
-from datasets import DatasetDict, Dataset
 from datasets import DatasetDict
 from transformers import WhisperProcessor
-from datasets import Dataset
-from datasets import disable_caching
-disable_caching()
-import soundfile as sf
-"""
-Step 5: Preprocess the Dataset
-================================
-"""
+
+MODEL_PATH = os.getenv("WHISPER_MODEL_NAME", "/home/nisha/whisper-large-v3-hf")
+
+_worker_processor = None
+# per-worker counter, resets each process — used only for progress prints
+_examples_seen = 0
+
+
+def get_processor():
+    global _worker_processor
+    if _worker_processor is None:
+        print(
+            f"[preprocess][pid={os.getpid()}] loading processor from {MODEL_PATH}")
+        _worker_processor = WhisperProcessor.from_pretrained(MODEL_PATH)
+        _worker_processor.tokenizer.set_prefix_tokens(
+            language="en", task="transcribe")
+    return _worker_processor
 
 
 class MedicalWhisperPreprocessor:
@@ -33,113 +31,75 @@ class MedicalWhisperPreprocessor:
     def __init__(
         self,
         processor: WhisperProcessor,
-        audio_column: str = "audio",
-        transcript_column: str = "sentence",
+        audio_column="audio",
+        transcript_column="sentence",
+        num_proc=None,
+        writer_batch_size=1000,
     ):
         self.processor = processor
         self.audio_column = audio_column
         self.transcript_column = transcript_column
+        self.num_proc = num_proc or min(8, os.cpu_count() or 1)
+        # smaller writer_batch_size = less RAM held before flush to Arrow,
+        # at the cost of more frequent (small) disk writes. 1000 is a
+        # reasonable default; drop to 200-500 if you see OOM at millions of rows.
+        self.writer_batch_size = writer_batch_size
 
-    def _process_split(self, split_dataset, split_name: str) -> Dataset:
-        n = len(split_dataset)
+    def preprocess_example(self, example):
+        global _examples_seen
+        processor = get_processor() if self.num_proc > 1 else self.processor
 
-        def gen():
-            for i in range(n):
-                if i % 100 == 0:
-                    print(f"    {split_name}: {i}/{n}")
+        audio_path = example[self.audio_column]["path"]
+        audio, sr = sf.read(audio_path, dtype="float32")
 
-                example = split_dataset[i]
-                audio_path = example["audio"]["path"]
+        features = processor.feature_extractor(
+            audio, sampling_rate=self.TARGET_SR, return_tensors="np",
+        ).input_features[0]
 
-
-                audio, sr = sf.read(
-                    audio_path,
-                    dtype="float32"
-                )
-                text = example[self.transcript_column]
-
-                features = self.processor.feature_extractor(
-                    audio,
-                    sampling_rate=self.TARGET_SR,
-                    return_tensors="np",
-                    padding="max_length",
-                    truncation=True,
-                ).input_features[0]        # keep as numpy — don't .tolist() it
-
-                label_ids = self.processor.tokenizer(
-                    text,
-                    max_length=self.MAX_LABEL_TOKENS,
-                    truncation=True,
-                ).input_ids                 # no padding — collator handles it
-
-                yield {
-                    "input_features": features,
-                    "labels": label_ids,
-                    "raw_text": text,
-                }
-
-        return Dataset.from_generator(gen, writer_batch_size=8)
-
-    def __call__(self, dataset_dict: DatasetDict, batch_size: int = 8) -> DatasetDict:
-        print("[Preprocess] Processing splits (audio -> log-Mel, text -> tokens) ...")
-        out = {}
-        for split in dataset_dict:
-            print(f"  Processing {split} ...")
-            out[split] = self._process_split(dataset_dict[split], split)
-
-        dataset_dict = DatasetDict(out)
-
-        print("[Preprocess] Done.")
-        for split, ds in dataset_dict.items():
-            print(f"  {split:12s}: {len(ds):,} examples")
-        return dataset_dict
-
-
-def preprocess_dataset(
-    dataset: DatasetDict,
-    processor: WhisperProcessor,
-    skip_preprocessing: bool = False,
-) -> DatasetDict:
-    if skip_preprocessing:
-        print("\n-- Step 5: Skipped (data already pre-processed) --")
-        return dataset
-
-    print("\n-- Step 5: Preprocessing dataset --")
-    return MedicalWhisperPreprocessor(processor)(dataset)
-
-
-if __name__ == "__main__":
-    import numpy as np
-    from datasets import Dataset, DatasetDict
-    from transformers import WhisperProcessor
-
-    MODEL_NAME  = "openai/whisper-small"
-    SAMPLE_TEXT = "Patient was prescribed 500 mg amoxicillin twice daily."
-    SR          = 16_000
-
-    processor = WhisperProcessor.from_pretrained(
-        MODEL_NAME, language="English", task="transcribe"
-    )
-
-    def make_split(n):
-        silence = np.zeros(SR * 3, dtype=np.float32)
-        feats = processor.feature_extractor(
-            [silence] * n, sampling_rate=SR,
-            return_tensors="np", padding="max_length", truncation=True,
-        ).input_features
-        tok = processor.tokenizer(
-            [SAMPLE_TEXT] * n, max_length=448, truncation=True, padding="max_length"
+        labels = processor.tokenizer(
+            example[self.transcript_column],
+            truncation=True,
+            max_length=self.MAX_LABEL_TOKENS,
         ).input_ids
-        pad_id = processor.tokenizer.pad_token_id
-        labels = [[(t if t != pad_id else -100) for t in seq] for seq in tok]
-        return {"input_features": [feats[i] for i in range(n)], "labels": labels}
 
-    dataset = DatasetDict({
-        "train"     : Dataset.from_dict(make_split(6)),
-        "validation": Dataset.from_dict(make_split(3)),
-        "test"      : Dataset.from_dict(make_split(3)),
-    })
+        _examples_seen += 1
+        if _examples_seen % 5000 == 0:
+            print(
+                f"[preprocess][pid={os.getpid()}] processed {_examples_seen:,} examples in this worker")
 
-    processed = preprocess_dataset(dataset, processor, skip_preprocessing=True)
-    print("Step 5 standalone test complete.")
-    print(f"  columns: {processed['train'].column_names}")
+        # audio array goes out of scope right after this return —
+        # nothing holds onto the raw waveform beyond this function call
+        return {
+            "input_features": features,
+            "labels": labels,
+            "raw_text": example[self.transcript_column],
+        }
+
+    def __call__(self, dataset_dict: DatasetDict):
+        print("[preprocess] Processing dataset...")
+        print(
+            f"[preprocess] num_proc={self.num_proc}  writer_batch_size={self.writer_batch_size}")
+
+        processed = DatasetDict()
+
+        for split, dataset in dataset_dict.items():
+            print(f"\n[preprocess] --- {split} ---")
+            print(f"[preprocess] examples to process: {len(dataset):,}")
+            t0 = time.time()
+
+            processed[split] = dataset.map(
+                self.preprocess_example,
+                num_proc=self.num_proc,
+                remove_columns=dataset.column_names,
+                desc=f"Processing {split}",
+                writer_batch_size=self.writer_batch_size,
+                load_from_cache_file=True,
+            )
+
+            elapsed = time.time() - t0
+            rate = len(dataset) / elapsed if elapsed > 0 else 0
+            print(f"[preprocess] {split} done: {len(dataset):,} examples in {elapsed:.1f}s "
+                  f"(~{rate:.1f} examples/sec)")
+
+        print("\n[preprocess] Finished preprocessing all splits.")
+        return processed

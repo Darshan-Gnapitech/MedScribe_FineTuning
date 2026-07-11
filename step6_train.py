@@ -13,7 +13,6 @@
 import os
 import json
 import time
-from matplotlib.pylab import sample
 import torch
 import numpy as np
 from dataclasses import dataclass
@@ -26,7 +25,6 @@ from transformers import (
     GenerationConfig,
     WhisperProcessor,
     get_linear_schedule_with_warmup,
-    loss,
 )
 from peft import PeftModel
 from jiwer import wer as compute_wer
@@ -95,10 +93,15 @@ def save_checkpoint(
         json.dump({"step": step, **metrics}, f, indent=2)
 
 
-def maybe_resume(model, optimizer, scaler, output_dir):
+def maybe_resume(model, optimizer, scaler, output_dir, enabled: bool = True):
+    if not enabled:
+        print("[resume] RESUME_FROM_CHECKPOINT=false — starting fresh, ignoring any existing checkpoint")
+        return 0
+
     state_path = os.path.join(output_dir, "latest", "trainer_state.pt")
 
     if not os.path.exists(state_path):
+        print(f"[resume] No checkpoint found at {state_path} — starting fresh")
         return 0
 
     # Reload LoRA weights into the existing model in-place
@@ -148,7 +151,6 @@ def run_validation(
                     labels=labels,
                     return_dict=True,
                 )
-            print(outputs.loss)
             losses.append(outputs.loss.item())
 
             # WER — free autoregressive generation (no teacher forcing)
@@ -318,7 +320,10 @@ def train(
 
     # ── Resume if checkpoint exists ──────────────────────────────────────────
     output_dir = training_config.output_dir
-    start_step = maybe_resume(model, optimizer, scaler, output_dir)
+    resume_enabled = os.getenv(
+        "RESUME_FROM_CHECKPOINT", "true").strip().lower() in ("1", "true", "yes")
+    print(f"[train] RESUME_FROM_CHECKPOINT = {resume_enabled}")
+    start_step = maybe_resume(model, optimizer, scaler,output_dir, enabled=resume_enabled)
     accum_steps = training_config.gradient_accumulation_steps
     early_stop = EarlyStoppingState(
         patience=training_config.early_stopping_patience)

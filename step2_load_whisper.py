@@ -18,6 +18,7 @@ MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-small")  # default 
 
 
 def load_whisper(model_name: str = MODEL_NAME):
+    
     print("\n" + "=" * 60)
     print("STEP 3: Loading Whisper model + processor")
     print("=" * 60)
