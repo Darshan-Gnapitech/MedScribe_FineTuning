@@ -10,15 +10,16 @@ import numpy as np
 import torch
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from dotenv import load_dotenv
-import os 
+import os
 load_dotenv()  # load environment variables from .env file
 
-MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-small")  # default to small model
+# default to small model
+MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-large-v3")
 # MODEL_NAME = "openai/whisper-large-v3"  # uncomment for full run
 
 
 def load_whisper(model_name: str = MODEL_NAME):
-    
+
     print("\n" + "=" * 60)
     print("STEP 3: Loading Whisper model + processor")
     print("=" * 60)
