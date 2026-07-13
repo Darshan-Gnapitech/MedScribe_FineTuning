@@ -377,11 +377,14 @@ def train(
                 optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
+            last_log_time = time.time()
+            last_log_step = start_step
 
             # ── Logging ──────────────────────────────────────────────────────
             if global_step % training_config.logging_steps == 0:
-                elapsed = time.time() - t0
-                steps_sec = global_step / max(elapsed, 1e-6)
+                now = time.time()
+                steps_sec = (global_step - last_log_step) / max(now - last_log_time, 1e-6)
+                last_log_time, last_log_step = now, global_step
                 remaining = (max_steps -
                              global_step) / max(steps_sec, 1e-6)
                 avg_loss = running_loss / training_config.logging_steps
@@ -441,3 +444,71 @@ def train(
     print(
         f"[train] Best checkpoint saved to {os.path.join(output_dir, 'best')}")
     return summary
+
+def main():
+    """
+    Wires together the pieces owned by the other members and kicks off
+    train(). This module only owns the training loop itself (steps 7-10),
+    so the model / dataset / LoRA-attachment calls below import from the
+    modules those members own — swap the import paths below to match
+    wherever those land in the final repo layout.
+    """
+    import argparse
+    from step6_training_config import (
+        MedicalWhisperTrainingConfig,
+        build_training_components,
+    )
+
+    parser = argparse.ArgumentParser(description="Fine-tune Whisper on medical speech data")
+    parser.add_argument("--config", default="training_config.json",
+                         help="Path to a saved MedicalWhisperTrainingConfig JSON file")
+    parser.add_argument("--train-data", default=os.getenv("TRAIN_DATA_PATH", "data/train"),
+                         help="Path to the training dataset (Team A owned)")
+    parser.add_argument("--val-data", default=os.getenv("VAL_DATA_PATH", "data/val"),
+                         help="Path to the validation dataset (Team A owned)")
+    args = parser.parse_args()
+
+    # ── Config ───────────────────────────────────────────────────────────────
+    if os.path.exists(args.config):
+        training_config = MedicalWhisperTrainingConfig.load(args.config)
+        print(f"[main] Loaded config from {args.config}")
+    else:
+        training_config = MedicalWhisperTrainingConfig()
+        print(f"[main] No config file at {args.config} — using defaults")
+
+    # ── Processor ────────────────────────────────────────────────────────────
+    processor = WhisperProcessor.from_pretrained(training_config.model_name_or_path)
+
+    # ── Model (base + LoRA) — owned by whichever module attaches the adapter ─
+    # e.g. `from lora_setup import attach_lora`
+    from lora_setup import attach_lora
+    model = attach_lora(training_config, resume_from=os.path.join(
+        training_config.output_dir, "latest"))
+
+    # ── Datasets — owned by the data-preprocessing module ───────────────────
+    # e.g. `from dataset import MedicalWhisperDataset`
+    from dataset import MedicalWhisperDataset
+    train_dataset = MedicalWhisperDataset(args.train_data, processor)
+    val_dataset = MedicalWhisperDataset(args.val_data, processor)
+
+    # ── Data collator (this module's own step6 config helper) ───────────────
+    data_collator, _compute_metrics, training_config = build_training_components(
+        processor=processor,
+        lora_model=model,
+        output_dir=training_config.output_dir,
+    )
+
+    summary = train(
+        model=model,
+        processor=processor,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        training_config=training_config,
+        data_collator=data_collator,
+    )
+    print(f"[main] {summary}")
+    return summary
+
+
+if __name__ == "__main__":
+    main()
