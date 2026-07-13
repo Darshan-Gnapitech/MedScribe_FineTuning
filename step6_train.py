@@ -385,61 +385,105 @@ def train(
        
      
 
-            # ── Logging ──────────────────────────────────────────────────────
-            if global_step % training_config.logging_steps == 0:
-                now = time.time()
-                steps_sec = (global_step - last_log_step) / max(now - last_log_time, 1e-6)
-                last_log_time, last_log_step = now, global_step
-                remaining = (max_steps -
-                             global_step) / max(steps_sec, 1e-6)
-                avg_loss = running_loss / training_config.logging_steps
-                running_loss = 0.0
-                print(
-                    f"step {global_step:>6}/{max_steps} | "
-                    f"loss {avg_loss:.4f} | "
-                    f"grad_norm {grad_norm:.3f} | "
-                    f"lr {scheduler.get_last_lr()[0]:.2e} | "
-                    f"{steps_sec:.1f} steps/s | "
-                    f"ETA {remaining/60:.1f} min"
-                )
+                # ── Logging ──────────────────────────────────────────────────────
+                if global_step % training_config.logging_steps == 0:
+                    now = time.time()
+                    steps_sec = (global_step - last_log_step) / max(now - last_log_time, 1e-6)
+                    last_log_time, last_log_step = now, global_step
+                    remaining = (max_steps -
+                                 global_step) / max(steps_sec, 1e-6)
+                    avg_loss = running_loss / training_config.logging_steps
+                    running_loss = 0.0
+                    print(
+                        f"step {global_step:>6}/{max_steps} | "
+                        f"loss {avg_loss:.4f} | "
+                        f"grad_norm {grad_norm:.3f} | "
+                        f"lr {scheduler.get_last_lr()[0]:.2e} | "
+                        f"{steps_sec:.1f} steps/s | "
+                        f"ETA {remaining/60:.1f} min"
+                    )
 
-            # ── STEP 10: Validation ───────────────────────────────────────────
-            if global_step % training_config.eval_steps == 0:
-                val_loss, val_wer = run_validation(
-                    model, val_loader, processor, device, use_amp, amp_dtype
-                )
-                improved = early_stop.step(val_wer, global_step)
-                print(
-                    f"\n[val] step {global_step} | "
-                    f"val_loss {val_loss:.4f} | "
-                    f"WER {val_wer:.4f} | "
-                    f"{'✓ best' if improved else f'no improvement ({early_stop.counter}/{early_stop.patience})'}\n"
-                )
-                metrics = {"val_loss": val_loss, "val_wer": val_wer}
-                if improved:
+                # ── STEP 10: Validation ───────────────────────────────────────────
+                if global_step % training_config.eval_steps == 0:
+                    val_loss, val_wer = run_validation(
+                        model, val_loader, processor, device, use_amp, amp_dtype
+                    )
+                    improved = early_stop.step(val_wer, global_step)
+                    print(
+                        f"\n[val] step {global_step} | "
+                        f"val_loss {val_loss:.4f} | "
+                        f"WER {val_wer:.4f} | "
+                        f"{'✓ best' if improved else f'no improvement ({early_stop.counter}/{early_stop.patience})'}\n"
+                    )
+                    metrics = {"val_loss": val_loss, "val_wer": val_wer}
+                    if improved:
+                        save_checkpoint(model, optimizer, scaler,
+                                        global_step, metrics, output_dir, "best")
+                        export_best_weights(model, os.path.join(
+                            output_dir, "exported_best"))
                     save_checkpoint(model, optimizer, scaler,
-                                    global_step, metrics, output_dir, "best")
-                    export_best_weights(model, os.path.join(
-                        output_dir, "exported_best"))
-                save_checkpoint(model, optimizer, scaler,
-                                global_step, metrics, output_dir, "latest")
-                if early_stop.should_stop:
-                    print(f"[train] Early stopping at step {global_step}. "
-                          f"Best WER {early_stop.best_wer:.4f} at step {early_stop.best_step}.")
-                    break
+                                    global_step, metrics, output_dir, "latest")
+                    if early_stop.should_stop:
+                        print(f"[train] Early stopping at step {global_step}. "
+                              f"Best WER {early_stop.best_wer:.4f} at step {early_stop.best_step}.")
+                        break
 
-            model.train()
+                    model.train()
 
-        if early_stop.should_stop:
-            break
+                        if early_stop.should_stop:
+                            break
 
     # ── Training complete ─────────────────────────────────────────────────────
     val_loss, val_wer = run_validation(
         model, val_loader, processor, device, use_amp, amp_dtype
     )
     early_stop.step(val_wer, global_step)
+    
+    # ── Final validation ───────────────────────────────────────────────
+    val_loss, val_wer = run_validation(
+        model,
+        val_loader,
+        processor,
+        device,
+        use_amp,
+        amp_dtype,
+    )
+
+    improved = early_stop.step(val_wer, global_step)
+
+    metrics = {
+        "val_loss": val_loss,
+        "val_wer": val_wer,
+    }
+
+    # Always save the latest state
+    save_checkpoint(
+        model,
+        optimizer,
+        scaler,
+        global_step,
+        metrics,
+        output_dir,
+        "latest",
+    )
+
+    # If this final validation is the best, update the best checkpoint too
+    if improved:
+        save_checkpoint(
+            model,
+            optimizer,
+            scaler,
+            global_step,
+            metrics,
+            output_dir,
+            "best",
+        )
+        export_best_weights(
+            model,
+            os.path.join(output_dir, "exported_best"),
+        )
     summary = {
-        "best_step": early_stop.best_step,
+            "best_step": early_stop.best_step,
         "best_wer": early_stop.best_wer,
         "total_steps": global_step,
         "output_dir": output_dir,
