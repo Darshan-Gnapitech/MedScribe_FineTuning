@@ -430,25 +430,15 @@ def train(
 
                     model.train()
 
-                        if early_stop.should_stop:
-                            break
+                    if early_stop.should_stop:
+                        break
 
     # ── Training complete ─────────────────────────────────────────────────────
     val_loss, val_wer = run_validation(
         model, val_loader, processor, device, use_amp, amp_dtype
     )
-    early_stop.step(val_wer, global_step)
     
-    # ── Final validation ───────────────────────────────────────────────
-    val_loss, val_wer = run_validation(
-        model,
-        val_loader,
-        processor,
-        device,
-        use_amp,
-        amp_dtype,
-    )
-
+    
     improved = early_stop.step(val_wer, global_step)
 
     metrics = {
@@ -555,49 +545,7 @@ def main():
         training_config=training_config,
         data_collator=data_collator,
     )
-    # ── Final validation ───────────────────────────────────────────────
-    val_loss, val_wer = run_validation(
-        model,
-        val_loader,
-        processor,
-        device,
-        use_amp,
-        amp_dtype,
-    )
 
-    improved = early_stop.step(val_wer, global_step)
-
-    metrics = {
-        "val_loss": val_loss,
-        "val_wer": val_wer,
-    }
-
-    # Always save the latest state
-    save_checkpoint(
-        model,
-        optimizer,
-        scaler,
-        global_step,
-        metrics,
-        output_dir,
-        "latest",
-    )
-
-    # If this final validation is the best, update the best checkpoint too
-    if improved:
-        save_checkpoint(
-            model,
-            optimizer,
-            scaler,
-            global_step,
-            metrics,
-            output_dir,
-            "best",
-        )
-        export_best_weights(
-            model,
-            os.path.join(output_dir, "exported_best"),
-        )
     print(f"[main] {summary}")
     return summary
 
