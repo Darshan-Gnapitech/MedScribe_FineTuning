@@ -225,8 +225,12 @@ def train(
     assert mel_shape == torch.Size([expected_bins, 3000]), (
     f"Expected mel shape ({expected_bins}, 3000), got {mel_shape}")
     labels = torch.tensor(sample["labels"])
-    print("Labels:", processor.tokenizer.decode(
-        labels[0]), len(processor.tokenizer.decode(labels.tolist())))
+    print(
+        processor.tokenizer.decode(
+            labels.tolist(),
+            skip_special_tokens=True,
+        )
+    )    
     assert processor.tokenizer.eos_token_id in sample["labels"], (
         "No EOS token in labels — decoder will never learn to stop"
     )
@@ -237,7 +241,7 @@ def train(
     total = sum(p.numel() for p in model.parameters())
     ratio = trainable / total
     assert ratio < 0.06, (
-        f"Trainable param ratio {ratio:.2%} exceeds 2% — LoRA may not be frozen correctly"
+        f"Trainable param ratio {ratio:.2%} exceeds 6% — LoRA may not be frozen correctly"
     )
 
     print(f"[contract] ✓ train_data: {len(train_dataset)} samples")
@@ -292,9 +296,9 @@ def train(
         weight_decay=training_config.weight_decay,
         eps=1e-8,
     )
-    max_steps = len(train_loader) * training_config.num_train_epochs
+    max_steps = updates_per_epoch * training_config.num_train_epochs
 
-    optimizer_steps = updates_per_epoch * training_config.num_train_epochs
+    optimizer_steps = max_steps
     assert training_config.eval_steps <= max_steps, (
         f"eval_steps ({training_config.eval_steps}) > max_steps ({max_steps}) — "
         f"validation will never run. Lower eval_steps or raise num_train_epochs."
@@ -344,6 +348,8 @@ def train(
     print(f"[train] effective batch = "
           f"{training_config.per_device_train_batch_size} × {accum_steps} = "
           f"{training_config.per_device_train_batch_size * accum_steps}\n")
+    last_log_time = time.time()
+    last_log_step = start_step
 
     # FIX — everything inside the for loop, remove the stray comment
     while global_step < max_steps:
@@ -375,10 +381,9 @@ def train(
                 scaler.update()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
-
-            global_step += 1
-            last_log_time = time.time()
-            last_log_step = start_step
+                global_step += 1
+       
+     
 
             # ── Logging ──────────────────────────────────────────────────────
             if global_step % training_config.logging_steps == 0:
@@ -506,6 +511,49 @@ def main():
         training_config=training_config,
         data_collator=data_collator,
     )
+    # ── Final validation ───────────────────────────────────────────────
+    val_loss, val_wer = run_validation(
+        model,
+        val_loader,
+        processor,
+        device,
+        use_amp,
+        amp_dtype,
+    )
+
+    improved = early_stop.step(val_wer, global_step)
+
+    metrics = {
+        "val_loss": val_loss,
+        "val_wer": val_wer,
+    }
+
+    # Always save the latest state
+    save_checkpoint(
+        model,
+        optimizer,
+        scaler,
+        global_step,
+        metrics,
+        output_dir,
+        "latest",
+    )
+
+    # If this final validation is the best, update the best checkpoint too
+    if improved:
+        save_checkpoint(
+            model,
+            optimizer,
+            scaler,
+            global_step,
+            metrics,
+            output_dir,
+            "best",
+        )
+        export_best_weights(
+            model,
+            os.path.join(output_dir, "exported_best"),
+        )
     print(f"[main] {summary}")
     return summary
 
