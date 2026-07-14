@@ -34,12 +34,12 @@ class MedicalWhisperPreprocessor:
         audio_column="audio",
         transcript_column="sentence",
         num_proc=None,
-        writer_batch_size=1000,
+        writer_batch_size=100,
     ):
         self.processor = processor
         self.audio_column = audio_column
         self.transcript_column = transcript_column
-        self.num_proc = num_proc or min(8, os.cpu_count() or 1)
+        self.num_proc = num_proc or min(2, os.cpu_count() or 1)
         # smaller writer_batch_size = less RAM held before flush to Arrow,
         # at the cost of more frequent (small) disk writes. 1000 is a
         # reasonable default; drop to 200-500 if you see OOM at millions of rows.
