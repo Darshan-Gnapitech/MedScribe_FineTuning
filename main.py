@@ -12,7 +12,7 @@ from step0_build_dataset import build_dataset
 from step1_load_dataset import load_chunk_dataset
 from step2_load_whisper import load_whisper, run_sanity_check, print_deliverable
 from step3_attach_lora import attach_lora
-from step4_preprocess import MedicalWhisperPreprocessor
+from step4b_lazy_dataset import LazyWhisperDataset
 from step5_training_config import build_training_components
 from step6_train import train
 import soundfile as sf
@@ -51,42 +51,13 @@ def main():
 
     # ── Step 4: Attach LoRA ──────────────────────────────────────
     model = attach_lora(model, resume_from=EXPORT_DIR)
-
-    preprocessor = MedicalWhisperPreprocessor(
-        processor,
-        num_proc=min(8, os.cpu_count() or 1),
-    )
-    # ── Step 5: Preprocess dataset ────────────────────────────────
-    def _processed_cache_is_stale(cache_path, raw_dataset):
-        from datasets import load_from_disk
-        try:
-            cached = load_from_disk(cache_path)
-        except Exception as e:
-            print(
-                f"[main] No usable cache at {cache_path} ({e.__class__.__name__}) — will preprocess fresh")
-            return True, None
-        for split in ("train", "validation", "test"):
-            raw_n, cached_n = len(raw_dataset[split]), len(cached[split])
-            print(
-                f"[main] cache check [{split}]: raw={raw_n:,} cached={cached_n:,}")
-            if raw_n != cached_n:
-                print(f"[main] -> STALE on {split}, will reprocess")
-                return True, None
-        print("[main] cache check passed for all splits — reusing cached processed dataset")
-        return False, cached
-
-
-    is_stale, cached_dataset = _processed_cache_is_stale(
-        PROCESSED_DATASET_PATH, dataset)
-
-    if not is_stale:
-        print(f"[main] Using cached processed dataset -> {PROCESSED_DATASET_PATH}")
-        dataset = cached_dataset
-    else:
-        dataset = preprocessor(dataset)
-        dataset.save_to_disk(PROCESSED_DATASET_PATH)
-        print(f"[main] Saved processed dataset -> {PROCESSED_DATASET_PATH}")
+    # ── Step 5: Lazy preprocessing (no upfront .map(), no OOM/disk risk) ──
+    train_dataset = LazyWhisperDataset(dataset["train"], processor)
+    val_dataset = LazyWhisperDataset(dataset["validation"], processor)
+    print(f"[main] Using lazy on-the-fly preprocessing "
+          f"(train={len(train_dataset):,}, val={len(val_dataset):,})")
     gc.collect()
+
     # ── Step 6: Build training components ────────────────────────
     data_collator, compute_metrics, config = build_training_components(
         processor=processor,
@@ -99,8 +70,8 @@ def main():
     summary = train(
         model=model,
         processor=processor,
-        train_dataset=dataset["train"],
-        val_dataset=dataset["validation"],
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
         training_config=config,
         data_collator=data_collator,
     )
