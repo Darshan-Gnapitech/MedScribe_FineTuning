@@ -15,7 +15,7 @@ def _load_split(split_name, output_dir):
     print(
         f"[load] {split_name}: {len(df):,} rows read ({time.time() - t0:.2f}s)")
 
-    df["audio"] = df["audio_file"].apply(lambda x: os.path.join(audio_dir, x))
+    df["audio"] = df["audio_files"].apply(lambda x: os.path.join(audio_dir, x))
     df.rename(columns={"transcript": "sentence"}, inplace=True)
     df = df[["audio", "sentence"]]
 

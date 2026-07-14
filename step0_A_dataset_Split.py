@@ -38,8 +38,8 @@ def _load_already_assigned(output_dir):
         if os.path.exists(csv_path):
             t0 = time.time()
             n_before = len(assigned)
-            for chunk in pd.read_csv(csv_path, usecols=["audio_file"], chunksize=CHUNK_READ_SIZE):
-                assigned.update(chunk["audio_file"].tolist())
+            for chunk in pd.read_csv(csv_path, usecols=["audio_files"], chunksize=CHUNK_READ_SIZE):
+                assigned.update(chunk["audio_files"].tolist())
             print(f"[split] read {split_name}.csv -> +{len(assigned) - n_before} ids "
                   f"({time.time() - t0:.2f}s)")
     print(
@@ -60,7 +60,7 @@ def _write_split_append(split_name, rows, output_dir, chunks_dir):
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["audio_file", "transcript"])
+            writer.writerow(["audio_files", "transcript"])
             print(f"[split] creating new {csv_path}")
 
         for audio_file, transcript in rows:
@@ -115,7 +115,7 @@ def split_chunk_dataset(input_dir, output_dir=None):
     total_seen = 0
     for chunk in pd.read_csv(manifest_path, chunksize=CHUNK_READ_SIZE):
         total_seen += len(chunk)
-        filtered = chunk[~chunk["audio_file"].isin(already_assigned)]
+        filtered = chunk[~chunk["audio_files"].isin(already_assigned)]
         if not filtered.empty:
             new_chunks.append(filtered)
         print(f"  [manifest] scanned {total_seen:,} rows so far, "

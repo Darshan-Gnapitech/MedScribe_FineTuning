@@ -247,7 +247,8 @@ def train(
 
     # ── Model ────────────────────────────────────────────────────────────────
     model = model.to(device)
-    model.gradient_checkpointing_enable()
+    
+    #model.gradient_checkpointing_enable()
     model.config.use_cache = False
     model.enable_input_require_grads()
 
@@ -265,6 +266,8 @@ def train(
         num_workers=training_config.num_workers,
         pin_memory=pin,
         collate_fn=data_collator,
+        persistent_workers=training_config.num_workers > 0,
+        prefetch_factor=2 if training_config.num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -273,9 +276,31 @@ def train(
         num_workers=training_config.num_workers,
         pin_memory=pin,
         collate_fn=data_collator,
+        persistent_workers=training_config.num_workers > 0,
+        prefetch_factor=2 if training_config.num_workers > 0 else None,
     )
-    # ── Optimizer — LoRA params only ─────────────────────────────────────────
+    import random
 
+    # Small random subset for fast interim validation checks during training.
+    # Full val_dataset is still used once at the very end (see bottom of train()).
+    subset_size = min(500, len(val_dataset))
+    subset_indices = random.Random(42).sample(range(len(val_dataset)), subset_size)
+    val_subset = torch.utils.data.Subset(val_dataset, subset_indices)
+
+    val_subset_loader = DataLoader(
+        val_subset,
+        batch_size=training_config.per_device_eval_batch_size,
+        shuffle=False,
+        num_workers=training_config.num_workers,
+        pin_memory=pin,
+        collate_fn=data_collator,
+        persistent_workers=training_config.num_workers > 0,
+        prefetch_factor=2 if training_config.num_workers > 0 else None,
+        )
+    print(f"[train] Using {subset_size}-row random subset for interim validation "
+      f"(full {len(val_dataset):,}-row set reserved for final validation)")
+    # ── Optimizer — LoRA params only ─────────────────────────────────────────
+    
     updates_per_epoch = math.ceil(
         len(train_loader)
         / training_config.gradient_accumulation_steps
@@ -292,8 +317,9 @@ def train(
         weight_decay=training_config.weight_decay,
         eps=1e-8,
     )
+    desired_num_evals=os.getenv("EVAL_NUMBER",100)
     max_steps = len(train_loader) * training_config.num_train_epochs
-
+    training_config.eval_steps=max(1,max_steps // desired_num_evals)
     optimizer_steps = updates_per_epoch * training_config.num_train_epochs
     assert training_config.eval_steps <= max_steps, (
         f"eval_steps ({training_config.eval_steps}) > max_steps ({max_steps}) — "
@@ -398,7 +424,7 @@ def train(
             # ── STEP 10: Validation ───────────────────────────────────────────
             if global_step % training_config.eval_steps == 0:
                 val_loss, val_wer = run_validation(
-                    model, val_loader, processor, device, use_amp, amp_dtype
+                    model, val_subset_loader, processor, device, use_amp, amp_dtype
                 )
                 improved = early_stop.step(val_wer, global_step)
                 print(

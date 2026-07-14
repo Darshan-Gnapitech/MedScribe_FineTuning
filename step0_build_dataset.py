@@ -781,8 +781,8 @@ After the first successful download, everything will run completely offline.
             print(
                 f"[build] scanning existing manifest for already-processed files ...")
             t0 = time.time()
-            for chunk in pd.read_csv(manifest_path, usecols=["audio_file"], chunksize=100_000):
-                for fname in chunk["audio_file"]:
+            for chunk in pd.read_csv(manifest_path, usecols=["audio_files"], chunksize=100_000):
+                for fname in chunk["audio_files"]:
                     processed_files.add(re.sub(r"_chunk\d+\.wav$", "", fname))
             print(f"[build] {len(processed_files):,} source files already processed "
                   f"({time.time() - t0:.2f}s)")

@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 import os 
 load_dotenv()  # load environment variables from .env file
 
-MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-small")  # default to small model
+MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-large-v3")  # default to small model
 # MODEL_NAME = "openai/whisper-large-v3"  # uncomment for full run
 
 
