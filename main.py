@@ -55,6 +55,8 @@ def main():
     preprocessor = MedicalWhisperPreprocessor(
         processor,
         num_proc=min(8, os.cpu_count() or 1),
+        writer_batch_size=100,
+        map_batch_size=16
     )
     # ── Step 5: Preprocess dataset ────────────────────────────────
     def _processed_cache_is_stale(cache_path, raw_dataset):
@@ -83,8 +85,7 @@ def main():
         print(f"[main] Using cached processed dataset -> {PROCESSED_DATASET_PATH}")
         dataset = cached_dataset
     else:
-        dataset = preprocessor(dataset)
-        dataset.save_to_disk(PROCESSED_DATASET_PATH)
+        dataset = preprocessor(dataset, output_dir=PROCESSED_DATASET_PATH)
         print(f"[main] Saved processed dataset -> {PROCESSED_DATASET_PATH}")
     gc.collect()
     # ── Step 6: Build training components ────────────────────────

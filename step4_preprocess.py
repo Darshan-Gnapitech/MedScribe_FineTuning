@@ -1,11 +1,12 @@
 import os
 import sys
+import gc
 import time
 import shutil
 import tempfile
 import numpy as np
 import soundfile as sf
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_from_disk
 from transformers import WhisperProcessor
 
 MODEL_PATH = os.getenv("WHISPER_MODEL_NAME", "/home/nisha/whisper-large-v3-hf")
@@ -30,6 +31,15 @@ class MedicalWhisperPreprocessor:
     TARGET_SR = 16_000
     MAX_LABEL_TOKENS = 448
 
+    # Examples per chunk. This is the hard ceiling on how much processed
+    # data (input_features + labels + raw_text) is ever resident at once,
+    # regardless of total dataset size. At ~1.7MB/example (measured via
+    # pyarrow's memory pool on this pipeline), 20_000 examples caps a
+    # single chunk's arrow-side footprint at ~34GB *before* it's written
+    # to disk and released -- tune down if that's still too much for your
+    # box, tune up if you have RAM to spare and want fewer, larger shards.
+    DEFAULT_CHUNK_SIZE = 20_000
+
     def __init__(
         self,
         processor: WhisperProcessor,
@@ -38,6 +48,7 @@ class MedicalWhisperPreprocessor:
         num_proc=None,
         writer_batch_size=1000,
         map_batch_size=32,
+        chunk_size=None,
     ):
         # Fail fast in the main process rather than deep inside a worker.
         if not os.path.isdir(MODEL_PATH):
@@ -50,22 +61,14 @@ class MedicalWhisperPreprocessor:
         self.audio_column = audio_column
         self.transcript_column = transcript_column
 
-        # Raised ceiling: feature extraction + sf.read is CPU/disk-bound and
-        # independent per example, so this scales well on a 24-physical/
-        # 48-logical-core box. Tune between 24-32 for your workload; leave a
-        # couple of cores free for the main process / disk I/O.
         cpu_count = os.cpu_count() or 1
         self.num_proc = num_proc or min(32, cpu_count)
 
-        # smaller writer_batch_size = less RAM held before flush to Arrow,
-        # at the cost of more frequent (small) disk writes. 1000 is a
-        # reasonable default; drop to 200-500 if you see OOM at millions of rows.
         self.writer_batch_size = writer_batch_size
-
-        # Size of each batch handed to preprocess_batch per map() call.
-        # Larger batches amortize Arrow (de)serialization / IPC overhead
-        # across num_proc workers; tune alongside num_proc and available RAM.
         self.map_batch_size = map_batch_size
+
+        self.chunk_size = chunk_size or int(
+            os.getenv("PREPROCESS_CHUNK_SIZE", self.DEFAULT_CHUNK_SIZE))
 
     def preprocess_batch(self, examples):
         """Batched map function: examples is a dict of column -> list of values."""
@@ -97,8 +100,6 @@ class MedicalWhisperPreprocessor:
             batch_labels.append(labels)
             batch_raw_text.append(transcript)
 
-            # audio array goes out of scope right after each iteration —
-            # nothing holds onto the raw waveform beyond this loop body
             _examples_seen += 1
             if _examples_seen % 5000 == 0:
                 print(
@@ -110,32 +111,128 @@ class MedicalWhisperPreprocessor:
             "raw_text": batch_raw_text,
         }
 
-    def __call__(self, dataset_dict: DatasetDict):
-        print("[preprocess] Processing dataset...")
+    def _process_chunk(self, chunk_dataset, chunk_shard_path):
+        """
+        Runs .map() over a single bounded chunk and writes it straight to
+        disk at chunk_shard_path. Nothing from this chunk is returned or
+        kept referenced by the caller -- the on-disk shard is the only
+        thing that survives past this call.
+
+        Note on why this actually bounds memory even though we never
+        diagnosed *why* datasets.map()/pyarrow doesn't release memory
+        internally: when num_proc > 1, each .map() call spawns a brand
+        new worker pool that is torn down when that call returns. Killing
+        those OS processes hands all their memory -- including whatever
+        pyarrow was holding onto -- back to the OS unconditionally. So
+        chunking bounds memory in two independent ways: (a) each chunk is
+        small, and (b) for num_proc>1 the worker processes literally die
+        between chunks. Only the main process (which stays alive across
+        chunks) needs chunk_size itself to be the safety margin.
+        """
+        processed_chunk = chunk_dataset.map(
+            self.preprocess_batch,
+            batched=True,
+            batch_size=self.map_batch_size,
+            num_proc=self.num_proc,
+            remove_columns=chunk_dataset.column_names,
+            desc="  chunk",
+            writer_batch_size=self.writer_batch_size,
+            load_from_cache_file=True,
+        )
+        processed_chunk.save_to_disk(chunk_shard_path)
+
+        # Drop every reference we hold to this chunk's in-process data
+        # before moving on, so the *main* process's own memory (relevant
+        # even when num_proc>1, since results still get pulled back into
+        # it to build processed_chunk) doesn't carry it into the next
+        # iteration.
+        del processed_chunk
+        del chunk_dataset
+        gc.collect()
+
+    def __call__(self, dataset_dict: DatasetDict, output_dir: str):
+        """
+        Processes each split in bounded chunks of self.chunk_size examples,
+        writing each chunk to a temporary shard directory and releasing it
+        before starting the next chunk. Once every chunk in a split is
+        done, the shards are concatenated (mmap-backed, so this does not
+        require loading the split into RAM) and the combined split is
+        saved to output_dir/<split>. Temporary chunk shards are deleted
+        afterward.
+
+        Returns a DatasetDict loaded via load_from_disk(output_dir), i.e.
+        memory-mapped, not held in RAM.
+        """
+        print("[preprocess] Processing dataset in bounded chunks...")
         print(
             f"[preprocess] num_proc={self.num_proc}  writer_batch_size={self.writer_batch_size}  "
-            f"map_batch_size={self.map_batch_size}")
-        processed = DatasetDict()
+            f"map_batch_size={self.map_batch_size}  chunk_size={self.chunk_size:,}")
+
+        os.makedirs(output_dir, exist_ok=True)
+        chunks_root = os.path.join(output_dir, "_chunks_tmp")
+        os.makedirs(chunks_root, exist_ok=True)
+
         for split, dataset in dataset_dict.items():
-            print(f"\n[preprocess] --- {split} ---")
-            print(f"[preprocess] examples to process: {len(dataset):,}")
+            split_final_path = os.path.join(output_dir, split)
+            split_chunks_dir = os.path.join(chunks_root, split)
+
+            if os.path.isdir(split_final_path):
+                print(f"\n[preprocess] --- {split} --- already exists at "
+                      f"{split_final_path}, skipping (delete it to reprocess)")
+                continue
+
+            os.makedirs(split_chunks_dir, exist_ok=True)
+
+            n = len(dataset)
+            n_chunks = (n + self.chunk_size - 1) // self.chunk_size
+            print(f"\n[preprocess] --- {split} --- "
+                  f"{n:,} examples -> {n_chunks} chunk(s) of up to {self.chunk_size:,}")
+
             t0 = time.time()
-            processed[split] = dataset.map(
-                self.preprocess_batch,
-                batched=True,
-                batch_size=self.map_batch_size,
-                num_proc=self.num_proc,
-                remove_columns=dataset.column_names,
-                desc=f"Processing {split}",
-                writer_batch_size=self.writer_batch_size,
-                load_from_cache_file=True,
-            )
+            shard_paths = []
+            for chunk_idx in range(n_chunks):
+                start = chunk_idx * self.chunk_size
+                end = min(start + self.chunk_size, n)
+                shard_path = os.path.join(split_chunks_dir, f"chunk_{chunk_idx:05d}")
+                shard_paths.append(shard_path)
+
+                if os.path.isdir(shard_path):
+                    print(f"[preprocess]   chunk {chunk_idx + 1}/{n_chunks} "
+                          f"({start:,}-{end:,}) already on disk, skipping")
+                    continue
+
+                print(f"[preprocess]   chunk {chunk_idx + 1}/{n_chunks} "
+                      f"({start:,}-{end:,}) processing...")
+                ct0 = time.time()
+                chunk_dataset = dataset.select(range(start, end))
+                self._process_chunk(chunk_dataset, shard_path)
+                print(f"[preprocess]   chunk {chunk_idx + 1}/{n_chunks} done "
+                      f"in {time.time() - ct0:.1f}s")
+
+            # Reassemble the split from its on-disk shards. load_from_disk
+            # is mmap-backed and concatenate_datasets on mmap-backed
+            # datasets does not require materializing the data in RAM --
+            # it builds a combined table referencing the existing arrow
+            # files directly.
+            print(f"[preprocess] {split}: concatenating {len(shard_paths)} shard(s) -> {split_final_path}")
+            shards = [load_from_disk(p) for p in shard_paths]
+            combined = concatenate_datasets(shards)
+            combined.save_to_disk(split_final_path)
+            del combined, shards
+            gc.collect()
+
             elapsed = time.time() - t0
-            rate = len(dataset) / elapsed if elapsed > 0 else 0
-            print(f"[preprocess] {split} done: {len(dataset):,} examples in {elapsed:.1f}s "
+            rate = n / elapsed if elapsed > 0 else 0
+            print(f"[preprocess] {split} done: {n:,} examples in {elapsed:.1f}s "
                   f"(~{rate:.1f} examples/sec)")
+
+        shutil.rmtree(chunks_root, ignore_errors=True)
         print("\n[preprocess] Finished preprocessing all splits.")
-        return processed
+
+        return DatasetDict({
+            split: load_from_disk(os.path.join(output_dir, split))
+            for split in dataset_dict.keys()
+        })
 
 
 def _make_fake_dataset_dict(tmp_dir, n_train=12, n_val=4, sr=16_000, seconds=1.0):
@@ -148,8 +245,6 @@ def _make_fake_dataset_dict(tmp_dir, n_train=12, n_val=4, sr=16_000, seconds=1.0
     def build_split(n, prefix):
         paths, sentences = [], []
         for i in range(n):
-            # short sine tone at a slightly different frequency per example,
-            # just so files aren't byte-identical
             freq = 220 + (i * 10)
             t = np.linspace(0, seconds, int(sr * seconds), endpoint=False)
             wave = 0.1 * np.sin(2 * np.pi * freq * t).astype(np.float32)
@@ -170,11 +265,12 @@ def _make_fake_dataset_dict(tmp_dir, n_train=12, n_val=4, sr=16_000, seconds=1.0
 
 def main():
     """Smoke test: builds a tiny synthetic dataset, runs it through
-    MedicalWhisperPreprocessor, and sanity-checks the output.
+    MedicalWhisperPreprocessor's chunked pipeline, and sanity-checks the output.
 
     Usage:
-        python step4_preprocess.py                # small num_proc, quick check
-        python step4_preprocess.py --num-proc 4    # override worker count
+        python step4_preprocess.py                        # small num_proc, quick check
+        python step4_preprocess.py --num-proc 4            # override worker count
+        python step4_preprocess.py --chunk-size 5           # force multiple chunks on a tiny set
     """
     import argparse
 
@@ -183,9 +279,12 @@ def main():
                          help="Workers to use for this test run (keep small; this is a smoke test, not a benchmark).")
     parser.add_argument("--n-train", type=int, default=12)
     parser.add_argument("--n-val", type=int, default=4)
+    parser.add_argument("--chunk-size", type=int, default=5,
+                         help="Deliberately small so the 12/4-row smoke test still exercises multiple chunks.")
     args = parser.parse_args()
 
     tmp_dir = tempfile.mkdtemp(prefix="whisper_preprocess_smoketest_")
+    output_dir = os.path.join(tmp_dir, "processed")
     ok = True
     try:
         print(f"[smoketest] MODEL_PATH={MODEL_PATH}")
@@ -193,8 +292,6 @@ def main():
         raw_dataset = _make_fake_dataset_dict(
             tmp_dir, n_train=args.n_train, n_val=args.n_val)
 
-        # Load the processor once in the main process — matches how the
-        # real pipeline constructs MedicalWhisperPreprocessor.
         processor = WhisperProcessor.from_pretrained(MODEL_PATH)
         processor.tokenizer.set_prefix_tokens(language="en", task="transcribe")
 
@@ -203,11 +300,11 @@ def main():
             num_proc=args.num_proc,
             writer_batch_size=8,
             map_batch_size=4,
+            chunk_size=args.chunk_size,
         )
 
-        processed = preprocessor(raw_dataset)
+        processed = preprocessor(raw_dataset, output_dir=output_dir)
 
-        # --- Sanity checks ---
         for split, expected_n in [("train", args.n_train), ("validation", args.n_val)]:
             ds = processed[split]
             assert len(ds) == expected_n, (

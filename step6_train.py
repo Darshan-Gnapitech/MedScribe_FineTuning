@@ -297,7 +297,7 @@ def train(
         eps=1e-8,
     )
     max_steps = updates_per_epoch * training_config.num_train_epochs
-
+    training_config.eval_steps=max(1, max_steps // 10)
     optimizer_steps = max_steps
     assert training_config.eval_steps <= max_steps, (
         f"eval_steps ({training_config.eval_steps}) > max_steps ({max_steps}) — "

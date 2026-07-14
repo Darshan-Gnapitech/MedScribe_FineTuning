@@ -26,7 +26,9 @@ def _load_split(split_name, output_dir):
         "audio", Audio(sampling_rate=16000, decode=False))
     print(
         f"[load] {split_name}: Dataset built, audio decode is lazy (decode=False)")
-
+    #cache_path = os.path.join(output_dir, split_name, f"{split_name}_arrow_cache")
+    #dataset.save_to_disk(cache_path)
+    #dataset = Dataset.load_from_disk(cache_path)
     return dataset
 
 
