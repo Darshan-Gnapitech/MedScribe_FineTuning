@@ -30,8 +30,9 @@ def load_whisper(model_name: str = MODEL_NAME, device: torch.device = DEVICE):
     processor = WhisperProcessor.from_pretrained(model_name)
     processor.tokenizer.set_prefix_tokens(language="en", task="transcribe")
     print(f"\n  Processor loaded  ({model_name})")
- 
-    model = WhisperForConditionalGeneration.from_pretrained(model_name)
+
+    model = WhisperForConditionalGeneration.from_pretrained(model_name, dtype=torch.bfloat16,attn_implementation="sdpa")
+    print(f"[debug] attn implementation: {model.config._attn_implementation}") 
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []
     total = sum(p.numel() for p in model.parameters())
@@ -63,7 +64,7 @@ def run_sanity_check(
         arr,
         sampling_rate=16000,
         return_tensors="pt",
-    ).input_features.to(device)
+    ).input_features.to(device,dtype=model.dtype)
  
     model.eval()  # belt-and-suspenders: safe even if load_whisper's caller mutated model state
     with torch.no_grad():

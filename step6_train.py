@@ -16,7 +16,7 @@ import time
 import torch
 import numpy as np
 from dataclasses import dataclass
-
+import random
 from torch.optim import AdamW
 from torch.utils.data import Dataset, DataLoader
 from torch.amp import GradScaler, autocast
@@ -277,7 +277,22 @@ def train(
         num_workers=training_config.num_workers,
         pin_memory=pin,
         collate_fn=data_collator,
+    
     )
+    subset_size = min(500, len(val_dataset))
+    subset_indices = random.Random(42).sample(range(len(val_dataset)), subset_size)
+    val_subset = torch.utils.data.Subset(val_dataset, subset_indices)
+
+    val_subset_loader = DataLoader(
+        val_subset,
+        batch_size=training_config.per_device_eval_batch_size,
+        shuffle=False,
+        num_workers=training_config.num_workers,
+        pin_memory=pin,
+        collate_fn=data_collator,
+    )
+    print(f"[train] Using {subset_size}-row random subset for interim validation "
+          f"(full {len(val_dataset):,}-row set reserved for final validation)")
     # ── Optimizer — LoRA params only ─────────────────────────────────────────
 
     updates_per_epoch = math.ceil(
@@ -406,7 +421,7 @@ def train(
                 # ── STEP 10: Validation ───────────────────────────────────────────
                 if global_step % training_config.eval_steps == 0:
                     val_loss, val_wer = run_validation(
-                        model, val_loader, processor, device, use_amp, amp_dtype
+                        model, val_subset_loader, processor, device, use_amp, amp_dtype
                     )
                     improved = early_stop.step(val_wer, global_step)
                     print(
