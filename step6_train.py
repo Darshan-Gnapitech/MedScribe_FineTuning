@@ -155,10 +155,11 @@ def run_validation(
 
             # WER — free autoregressive generation (no teacher forcing)
             model.config.use_cache = True
-            predicted_ids = model.generate(
-                input_features=features,
-                max_new_tokens=200,
-            )
+            with autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                predicted_ids = model.generate(
+                    input_features=features,
+                    max_new_tokens=200,
+                )
             model.config.use_cache = False
             decoded = processor.batch_decode(
                 predicted_ids, skip_special_tokens=True)

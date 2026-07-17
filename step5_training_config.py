@@ -56,7 +56,7 @@ class MedicalWhisperTrainingConfig:
     adam_beta2: float = 0.98
     eval_steps: int = 200
     max_grad_norm: float = 1.0
-    max_vram_gb: float = 40.0
+    max_vram_gb: float = 20.0
 
     _CUSTOM_FIELDS = {
         "num_workers", "early_stopping_patience", "adam_beta1", "adam_beta2", "max_vram_gb"

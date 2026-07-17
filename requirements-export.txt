@@ -1,0 +1,10 @@
+# Extra dependencies for the OPTIONAL post-training export scripts
+# (merge_lora.py, convert_to_ct2.py, export_whisperx.py).
+#
+# These are intentionally kept out of requirements.txt so the training
+# pipeline's dependency set is completely unaffected.
+#
+# Install with:
+#   pip install -r requirements-export.txt
+
+ctranslate2>=4.0
